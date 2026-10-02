@@ -1,0 +1,454 @@
+"""
+Comprehensive tests for the confused-deputy detector.
+
+Covers all 12+ required test cases plus deterministic repeatability.
+"""
+
+from auth_engine.detector import ConfusedDeputyDetector
+from auth_engine.models import (
+    Authority,
+    AuthoritySource,
+    AuthorizationScenario,
+    CredentialType,
+    DelegationStep,
+    Finding,
+    Identity,
+    Operation,
+    PrincipalType,
+    Severity,
+    Verdict,
+)
+from auth_engine.policy import ActionPolicy
+
+from .fixtures import (
+    ALL_FIXTURES,
+    AGENT,
+    CHECKOUT_SERVICE,
+    PAYMENT_SERVICE,
+    USER_123,
+    direct_call_authorized,
+    golden_confused_deputy,
+    legitimate_delegated_authorization,
+    legitimate_direct_authorization,
+    missing_action_requirement,
+    missing_effective_operation,
+    missing_initiating_identity,
+    missing_original_authority,
+    multi_hop_valid_delegation,
+    service_privilege_exceeds_request,
+    unrelated_downstream_operation,
+)
+
+# Instantiate the detector once — it is stateless.
+DETECTOR = ConfusedDeputyDetector()
+
+
+# ===================================================================
+# 1. GOLDEN CONFUSED DEPUTY  →  DETECTED
+# ===================================================================
+
+
+class TestGoldenConfusedDeputy:
+    """
+    The canonical test.
+
+    User authority: orders:read
+    Required action: payments:charge
+    No delegated payment authority.
+    Service has payments:charge.
+
+    Expected: DETECTED
+    """
+
+    def test_verdict(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        assert result.verdict == Verdict.DETECTED
+
+    def test_reason_mentions_payments_charge(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        assert "payments:charge" in result.reason
+
+    def test_finding_severity(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        assert result.finding.severity == Severity.HIGH
+
+    def test_finding_has_attack_path(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        assert len(result.finding.attack_path) > 0
+
+    def test_finding_trace_id(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        assert result.finding.trace_id == "trace-golden-001"
+
+    def test_details_structure(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        assert "required_action" in result.details
+        assert "request_authority" in result.details
+        assert "service_authority" in result.details
+        assert "payments:charge" in result.details["required_action"]
+        assert "orders:read" in result.details["request_authority"]
+        assert "payments:charge" in result.details["service_authority"]
+
+    def test_effective_action_in_finding(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        assert result.finding.effective_action == "payments:charge"
+
+    def test_required_authority_in_finding(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        assert "payments:charge" in result.finding.required_authority
+
+    def test_delegated_authority_in_finding(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        # Request authority at the final hop should only have orders:read
+        assert result.finding.delegated_authority is not None
+        assert "orders:read" in result.finding.delegated_authority.permissions
+        assert "payments:charge" not in result.finding.delegated_authority.permissions
+
+
+# ===================================================================
+# 2. LEGITIMATE DIRECT AUTHORIZATION  →  NOT_DETECTED
+# ===================================================================
+
+
+class TestLegitimateDirectAuthorization:
+    """User has payments:charge — no confused deputy."""
+
+    def test_verdict(self):
+        result = DETECTOR.analyze(legitimate_direct_authorization())
+        assert result.verdict == Verdict.NOT_DETECTED
+
+    def test_reason(self):
+        result = DETECTOR.analyze(legitimate_direct_authorization())
+        assert "legitimately authorized" in result.reason
+
+
+# ===================================================================
+# 3. LEGITIMATE DELEGATED AUTHORIZATION  →  NOT_DETECTED
+# ===================================================================
+
+
+class TestLegitimateDelegatedAuthorization:
+    """
+    User only has orders:read, but payments:charge is explicitly
+    delegated at the checkout → payment hop.
+    """
+
+    def test_verdict(self):
+        result = DETECTOR.analyze(legitimate_delegated_authorization())
+        assert result.verdict == Verdict.NOT_DETECTED
+
+    def test_no_false_positive(self):
+        """Ensures we do NOT flag this as confused deputy."""
+        result = DETECTOR.analyze(legitimate_delegated_authorization())
+        assert result.verdict != Verdict.DETECTED
+
+
+# ===================================================================
+# 4. MULTI-HOP VALID DELEGATION  →  NOT_DETECTED
+# ===================================================================
+
+
+class TestMultiHopValidDelegation:
+    """Authority propagated correctly across User → Agent → Checkout → Payment."""
+
+    def test_verdict(self):
+        result = DETECTOR.analyze(multi_hop_valid_delegation())
+        assert result.verdict == Verdict.NOT_DETECTED
+
+    def test_reason_mentions_authorized(self):
+        result = DETECTOR.analyze(multi_hop_valid_delegation())
+        assert "legitimately authorized" in result.reason
+
+
+# ===================================================================
+# 5. SERVICE PRIVILEGE EXCEEDS REQUEST  →  DETECTED
+# ===================================================================
+
+
+class TestServicePrivilegeExceedsRequest:
+    """
+    Service has payments:charge.
+    Request only has orders:read.
+    Credential: service.
+    """
+
+    def test_verdict(self):
+        result = DETECTOR.analyze(service_privilege_exceeds_request())
+        assert result.verdict == Verdict.DETECTED
+
+    def test_reason(self):
+        result = DETECTOR.analyze(service_privilege_exceeds_request())
+        assert "payments:charge" in result.reason
+
+    def test_no_false_negative(self):
+        """Service-level authority must NOT make this legitimate."""
+        result = DETECTOR.analyze(service_privilege_exceeds_request())
+        assert result.verdict == Verdict.DETECTED
+
+
+# ===================================================================
+# 6. MISSING INITIATING IDENTITY  →  INSUFFICIENT_EVIDENCE
+# ===================================================================
+
+
+class TestMissingInitiatingIdentity:
+    def test_verdict(self):
+        result = DETECTOR.analyze(missing_initiating_identity())
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+
+    def test_reason(self):
+        result = DETECTOR.analyze(missing_initiating_identity())
+        assert "initiating principal" in result.reason.lower()
+
+
+# ===================================================================
+# 7. MISSING ORIGINAL AUTHORITY  →  INSUFFICIENT_EVIDENCE
+# ===================================================================
+
+
+class TestMissingOriginalAuthority:
+    def test_verdict(self):
+        result = DETECTOR.analyze(missing_original_authority())
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+
+    def test_reason(self):
+        result = DETECTOR.analyze(missing_original_authority())
+        assert "authority" in result.reason.lower()
+
+
+# ===================================================================
+# 8. MISSING ACTION REQUIREMENT  →  INSUFFICIENT_EVIDENCE
+# ===================================================================
+
+
+class TestMissingActionRequirement:
+    def test_verdict(self):
+        result = DETECTOR.analyze(missing_action_requirement())
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+
+    def test_reason(self):
+        result = DETECTOR.analyze(missing_action_requirement())
+        assert "operation" in result.reason.lower() or "action" in result.reason.lower()
+
+
+# ===================================================================
+# 9. UNRELATED DOWNSTREAM OPERATION  →  NOT_DETECTED
+# ===================================================================
+
+
+class TestUnrelatedDownstreamOperation:
+    """products:read action should not trigger a finding."""
+
+    def test_verdict(self):
+        result = DETECTOR.analyze(unrelated_downstream_operation())
+        assert result.verdict == Verdict.NOT_DETECTED
+
+
+# ===================================================================
+# 10. DETERMINISTIC REPEATABILITY
+# ===================================================================
+
+
+class TestDeterministicRepeatability:
+    """Same input must always produce the same verdict and reason."""
+
+    def test_golden_repeat_10_times(self):
+        scenario = golden_confused_deputy()
+        results = [DETECTOR.analyze(scenario) for _ in range(10)]
+        verdicts = {r.verdict for r in results}
+        reasons = {r.reason for r in results}
+        assert len(verdicts) == 1
+        assert Verdict.DETECTED in verdicts
+        assert len(reasons) == 1
+
+    def test_legitimate_repeat_10_times(self):
+        scenario = legitimate_direct_authorization()
+        results = [DETECTOR.analyze(scenario) for _ in range(10)]
+        verdicts = {r.verdict for r in results}
+        assert len(verdicts) == 1
+        assert Verdict.NOT_DETECTED in verdicts
+
+    def test_insufficient_repeat_10_times(self):
+        scenario = missing_initiating_identity()
+        results = [DETECTOR.analyze(scenario) for _ in range(10)]
+        verdicts = {r.verdict for r in results}
+        assert len(verdicts) == 1
+        assert Verdict.INSUFFICIENT_EVIDENCE in verdicts
+
+
+# ===================================================================
+# 11. NO FALSE POSITIVE ON VALID DELEGATED AUTHORITY
+# ===================================================================
+
+
+class TestNoFalsePositive:
+    """
+    Ensure that properly delegated authority never results in
+    a DETECTED verdict.
+    """
+
+    def test_direct_authorized(self):
+        result = DETECTOR.analyze(direct_call_authorized())
+        assert result.verdict == Verdict.NOT_DETECTED
+
+    def test_all_legitimate_fixtures(self):
+        for name, (factory, expected) in ALL_FIXTURES.items():
+            if expected == Verdict.NOT_DETECTED:
+                result = DETECTOR.analyze(factory())
+                assert result.verdict == Verdict.NOT_DETECTED, (
+                    f"False positive on fixture: {name}"
+                )
+
+
+# ===================================================================
+# 12. NO FALSE NEGATIVE WHEN SERVICE AUTHORITY IS IMPROPERLY USED
+# ===================================================================
+
+
+class TestNoFalseNegative:
+    """
+    Ensure that scenarios where service authority is used on behalf
+    of the user are always flagged.
+    """
+
+    def test_all_detected_fixtures(self):
+        for name, (factory, expected) in ALL_FIXTURES.items():
+            if expected == Verdict.DETECTED:
+                result = DETECTOR.analyze(factory())
+                assert result.verdict == Verdict.DETECTED, (
+                    f"False negative on fixture: {name}"
+                )
+
+
+# ===================================================================
+# 13. MISSING EFFECTIVE OPERATION  →  INSUFFICIENT_EVIDENCE
+# ===================================================================
+
+
+class TestMissingEffectiveOperation:
+    def test_verdict(self):
+        result = DETECTOR.analyze(missing_effective_operation())
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+
+
+# ===================================================================
+# 14. POLICY LOOKUP — ACTION RESOLVED VIA RAW SPAN NAME
+# ===================================================================
+
+
+class TestPolicyLookup:
+    """
+    When the operation has only a raw_span_name (no semantic_action or
+    explicit required_authority), the detector should use the policy
+    to resolve the requirement.
+    """
+
+    def test_resolved_from_span(self):
+        scenario = AuthorizationScenario(
+            trace_id="trace-policy-001",
+            initiating_principal=USER_123,
+            original_authority=Authority.original("orders:read"),
+            delegation_chain=[
+                DelegationStep(
+                    from_principal=USER_123,
+                    to_principal=PAYMENT_SERVICE,
+                    delegated_authority=Authority.delegated("orders:read"),
+                    credential_type=CredentialType.SERVICE_CREDENTIAL,
+                ),
+            ],
+            effective_operation=Operation(
+                service="payment",
+                raw_span_name="oteldemo.PaymentService/Charge",
+                # No semantic_action, no required_authority
+            ),
+            acting_service_authority=Authority.service("payments:charge"),
+        )
+        result = DETECTOR.analyze(scenario)
+        # payments:charge is NOT in orders:read, so this is a confused deputy
+        assert result.verdict == Verdict.DETECTED
+
+    def test_unknown_span_returns_insufficient(self):
+        scenario = AuthorizationScenario(
+            trace_id="trace-policy-002",
+            initiating_principal=USER_123,
+            original_authority=Authority.original("orders:read"),
+            effective_operation=Operation(
+                service="mystery",
+                raw_span_name="com.example.MysteryService/DoThing",
+            ),
+        )
+        result = DETECTOR.analyze(scenario)
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+
+
+# ===================================================================
+# 15. DIRECT CALL — NO DELEGATION CHAIN
+# ===================================================================
+
+
+class TestDirectCall:
+    def test_authorized_direct_call(self):
+        result = DETECTOR.analyze(direct_call_authorized())
+        assert result.verdict == Verdict.NOT_DETECTED
+
+    def test_unauthorized_direct_call(self):
+        scenario = AuthorizationScenario(
+            trace_id="trace-direct-unauth",
+            initiating_principal=USER_123,
+            original_authority=Authority.original("orders:read"),
+            delegation_chain=[],
+            effective_operation=Operation(
+                service="payment",
+                semantic_action="payments:charge",
+                required_authority=frozenset({"payments:charge"}),
+            ),
+            acting_service_authority=Authority.service("payments:charge"),
+        )
+        result = DETECTOR.analyze(scenario)
+        assert result.verdict == Verdict.DETECTED
+
+
+# ===================================================================
+# 16. CUSTOM POLICY
+# ===================================================================
+
+
+class TestCustomPolicy:
+    def test_custom_policy_mapping(self):
+        policy = ActionPolicy()
+        policy.register(
+            semantic_action="admin:delete",
+            required_permissions=["admin:delete"],
+            raw_span_names=["AdminService/Delete"],
+        )
+        detector = ConfusedDeputyDetector(policy=policy)
+
+        scenario = AuthorizationScenario(
+            trace_id="trace-custom-001",
+            initiating_principal=USER_123,
+            original_authority=Authority.original("admin:delete"),
+            delegation_chain=[],
+            effective_operation=Operation(
+                service="admin",
+                raw_span_name="AdminService/Delete",
+            ),
+        )
+        result = detector.analyze(scenario)
+        assert result.verdict == Verdict.NOT_DETECTED
+
+
+# ===================================================================
+# 17. ALL FIXTURES — META TEST
+# ===================================================================
+
+
+class TestAllFixtures:
+    """Run every registered fixture and verify the expected verdict."""
+
+    def test_all(self):
+        for name, (factory, expected) in ALL_FIXTURES.items():
+            result = DETECTOR.analyze(factory())
+            assert result.verdict == expected, (
+                f"Fixture '{name}': expected {expected.value}, "
+                f"got {result.verdict.value}"
+            )
