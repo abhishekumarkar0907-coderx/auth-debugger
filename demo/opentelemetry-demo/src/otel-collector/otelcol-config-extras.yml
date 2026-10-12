@@ -1,6 +1,7 @@
 exporters:
   otlphttp/backend:
     endpoint: "http://backend:8000"
+    compression: none
     tls:
       insecure: true
 
