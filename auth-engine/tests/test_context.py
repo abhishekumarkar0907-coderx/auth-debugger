@@ -150,6 +150,12 @@ class TestCompleteContext:
         ctx = extract_authorization_context(_complete_span_set())
         assert len(ctx.delegation_hops) == 2
 
+    def test_delegation_hops_scopes_preserved(self):
+        ctx = extract_authorization_context(_complete_span_set())
+        assert len(ctx.delegation_hops) == 2
+        assert ctx.delegation_hops[0].scopes_raw == "orders:read"
+        assert ctx.delegation_hops[1].scopes_raw == "orders:read"
+
     def test_has_sufficient_evidence(self):
         ctx = extract_authorization_context(_complete_span_set())
         assert ctx.has_sufficient_evidence() is True

@@ -583,6 +583,7 @@ def extract_authorization_context(
                     if isinstance(cred_type, str) and cred_type.strip()
                     else None
                 ),
+                scopes_raw=explicit_scopes,
                 span_id=span.span_id,
             )
             delegation_hops.append(hop)
