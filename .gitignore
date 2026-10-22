@@ -1,14 +1,22 @@
-﻿# Python virtual environments
-.venv/
-venv/
-ENV/
 
-# Python cache
+# Python bytecode and caches
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Python virtual environments
+.venv/
+.venv-*/
+venv/
+ENV/
+
+# Local environment variables
+.env
+.env.*
+!.env.example
 
 # Build artifacts
 build/
 dist/
 *.egg-info/
+
