@@ -19,6 +19,7 @@ from auth_engine.models import (
     Verdict,
 )
 from auth_engine.policy import ActionPolicy
+from auth_engine.delegation_policy import DelegationPolicy
 
 from .fixtures import (
     ALL_FIXTURES,
@@ -40,7 +41,13 @@ from .fixtures import (
 )
 
 # Instantiate the detector once — it is stateless.
-DETECTOR = ConfusedDeputyDetector()
+DELEGATION_POLICY = DelegationPolicy()
+DELEGATION_POLICY.register(
+    "checkout-svc",
+    "payment-svc",
+    {"payments:charge"},
+)
+DETECTOR = ConfusedDeputyDetector(delegation_policy=DELEGATION_POLICY)
 
 
 # ===================================================================
@@ -452,3 +459,44 @@ class TestAllFixtures:
                 f"Fixture '{name}': expected {expected.value}, "
                 f"got {result.verdict.value}"
             )
+
+
+def test_unauthorized_permission_expansion():
+    """Reject permissions added without a trusted delegation grant."""
+    from auth_engine.models import Authority
+    from tests.fixtures import legitimate_delegated_authorization
+
+    scenario = legitimate_delegated_authorization()
+    final_step = scenario.delegation_chain[-1]
+
+    scenario.delegation_chain[-1] = type(final_step)(
+        from_principal=final_step.from_principal,
+        to_principal=final_step.to_principal,
+        delegated_authority=Authority(
+            permissions=frozenset({
+                "orders:read",
+                "payments:charge",
+                "admin:delete",
+            }),
+            source=final_step.delegated_authority.source,
+        ),
+        credential_type=final_step.credential_type,
+        explicit=final_step.explicit,
+    )
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.DETECTED
+
+    # The finding must preserve the actual operation's requirements.
+    assert result.finding.required_authority == frozenset(
+        {"payments:charge"}
+    )
+    assert result.details["required_action"] == ["payments:charge"]
+
+    # The trusted grant permits payments:charge.
+    # Only admin:delete should be reported as unauthorized.
+    expansions = result.details["unauthorized_expansions"]
+
+    assert len(expansions) == 1
+    assert expansions[0]["permissions"] == ["admin:delete"]
