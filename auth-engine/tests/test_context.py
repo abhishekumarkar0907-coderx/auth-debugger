@@ -45,6 +45,7 @@ from auth_engine.context import (
     _parse_scopes,
 )
 from auth_engine.detector import ConfusedDeputyDetector
+from auth_engine.delegation_policy import DelegationPolicy
 from auth_engine.models import (
     Authority,
     AuthorizationScenario,
@@ -1111,7 +1112,15 @@ class TestDetectorPreservation:
     def test_all_fixtures_unchanged(self):
         from tests.fixtures import ALL_FIXTURES
 
-        detector = ConfusedDeputyDetector()
+        delegation_policy = DelegationPolicy()
+        delegation_policy.register(
+            "checkout-svc",
+            "payment-svc",
+            {"payments:charge"},
+        )
+        detector = ConfusedDeputyDetector(
+            delegation_policy=delegation_policy
+        )
         for name, (factory, expected) in ALL_FIXTURES.items():
             result = detector.analyze(factory())
             assert result.verdict == expected, (
