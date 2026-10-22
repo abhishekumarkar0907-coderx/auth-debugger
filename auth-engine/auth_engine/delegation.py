@@ -37,7 +37,8 @@ def compute_request_authority(
            previous request authority, it is an **explicit delegation
            addition** (e.g. a service adds ``payments:charge`` because
            the delegation policy says so).
-        4. Return the final cumulative delegated authority.
+        4. Return the authority declared by the last explicit step (or the
+           original authority if no step was explicit).
 
     If the delegation chain is empty the original authority is returned
     (tagged as DELEGATED so downstream comparisons work uniformly).

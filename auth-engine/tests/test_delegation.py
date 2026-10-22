@@ -66,6 +66,32 @@ class TestComputeRequestAuthority:
         result = compute_request_authority(orig, chain)
         assert "payments:charge" in result.permissions
 
+    def test_each_explicit_hop_replaces_current_authority(self):
+        orig = Authority.original("orders:read")
+        chain = [
+            DelegationStep(
+                from_principal=USER,
+                to_principal=CHECKOUT,
+                delegated_authority=Authority.delegated(
+                    "orders:read", "payments:charge"
+                ),
+                credential_type=CredentialType.DELEGATED_TOKEN,
+                explicit=True,
+            ),
+            DelegationStep(
+                from_principal=CHECKOUT,
+                to_principal=PAYMENT,
+                delegated_authority=Authority.delegated("payments:charge"),
+                credential_type=CredentialType.DELEGATED_TOKEN,
+                explicit=True,
+            ),
+        ]
+
+        result = compute_request_authority(orig, chain)
+
+        assert result.permissions == frozenset({"payments:charge"})
+        assert result.source == AuthoritySource.DELEGATED
+
     def test_multi_hop_carries_forward(self):
         orig = Authority.original("orders:read", "payments:charge")
         chain = [

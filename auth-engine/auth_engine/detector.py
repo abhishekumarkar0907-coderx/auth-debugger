@@ -18,6 +18,7 @@ from .models import (
     Verdict,
 )
 from .policy import ActionPolicy, default_otel_demo_policy
+from .delegation_policy import DelegationPolicy
 
 
 class ConfusedDeputyDetector:
@@ -31,8 +32,13 @@ class ConfusedDeputyDetector:
         assert result.verdict in (Verdict.DETECTED, ...)
     """
 
-    def __init__(self, policy: ActionPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: ActionPolicy | None = None,
+        delegation_policy: DelegationPolicy | None = None,
+    ) -> None:
         self._policy = policy or default_otel_demo_policy()
+        self._delegation_policy = delegation_policy or DelegationPolicy()
 
     # ------------------------------------------------------------------
     # Public API
@@ -84,6 +90,38 @@ class ConfusedDeputyDetector:
             scenario.original_authority,
             scenario.delegation_chain,
         )
+
+        # Reject explicit permission expansions without a trusted grant.
+        unauthorized_expansions = self._find_unauthorized_expansions(scenario)
+        if unauthorized_expansions:
+            summary = "; ".join(
+                f"{from_id} -> {to_id}: {', '.join(sorted(permissions))}"
+                for from_id, to_id, permissions in unauthorized_expansions
+            )
+            result = self._detected(
+                scenario,
+                request_authority=request_authority,
+                required=required,
+                service_authority=scenario.acting_service_authority,
+                reason_suffix=(
+                    "unauthorized permission expansion without a trusted "
+                    f"delegation grant ({summary})"
+                ),
+                reason_override=(
+                    "Unauthorized permission expansion detected: "
+                    f"{summary}. No matching trusted delegation grant authorizes "
+                    "these permissions."
+                ),
+            )
+            result.details["unauthorized_expansions"] = [
+                {
+                    "from_principal": from_id,
+                    "to_principal": to_id,
+                    "permissions": sorted(permissions),
+                }
+                for from_id, to_id, permissions in unauthorized_expansions
+            ]
+            return result
 
         # ---- Step 4 + 5: Compare required vs. request -------------------
 
@@ -139,6 +177,43 @@ class ConfusedDeputyDetector:
                 "own authority includes the required permissions"
             ),
         )
+
+    def _find_unauthorized_expansions(
+        self, scenario: AuthorizationScenario
+    ) -> list[tuple[str, str, frozenset[str]]]:
+        """Find explicit permission additions without a matching trusted grant."""
+        assert scenario.original_authority is not None
+
+        current = scenario.original_authority.permissions
+        unauthorized = []
+
+        for step in scenario.delegation_chain:
+            if not step.explicit:
+                continue
+
+            declared = step.delegated_authority.permissions
+            additions = declared - current
+
+            unauthorized_additions = frozenset(
+                permission
+                for permission in additions
+                if not self._delegation_policy.permits(
+                    step.from_principal.principal_id,
+                    step.to_principal.principal_id,
+                    frozenset({permission}),
+                )
+            )
+
+            if unauthorized_additions:
+                unauthorized.append((
+                    step.from_principal.principal_id,
+                    step.to_principal.principal_id,
+                    unauthorized_additions,
+                ))
+
+            current = declared
+
+        return unauthorized
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -224,14 +299,19 @@ class ConfusedDeputyDetector:
         required: frozenset[str],
         service_authority: Authority | None,
         reason_suffix: str,
+        reason_override: str | None = None,
     ) -> DetectionResult:
         required_str = ", ".join(sorted(required))
         request_str = ", ".join(sorted(request_authority.permissions)) or "(none)"
-        reason = (
-            f"{required_str} required by downstream operation but not present "
-            f"in delegated request authority [{request_str}]; "
-            f"{reason_suffix}"
-        )
+
+        if reason_override is not None:
+            reason = reason_override
+        else:
+            reason = (
+                f"{required_str} required by downstream operation but not present "
+                f"in delegated request authority [{request_str}]; "
+                f"{reason_suffix}"
+            )
 
         attack_path = build_attack_path(
             scenario.initiating_principal, scenario.delegation_chain
