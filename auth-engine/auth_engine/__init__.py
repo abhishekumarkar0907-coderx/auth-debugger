@@ -11,6 +11,7 @@ from .models import (
     DelegationStep,
     DetectionResult,
     Finding,
+    FindingType,
     Identity,
     Operation,
     PrincipalType,
@@ -24,6 +25,7 @@ from .delegation import (
     build_attack_path,
     compute_request_authority,
 )
+from . import graph
 
 __all__ = [
     # Models
@@ -35,6 +37,7 @@ __all__ = [
     "DelegationStep",
     "DetectionResult",
     "Finding",
+    "FindingType",
     "Identity",
     "Operation",
     "PrincipalType",
@@ -50,4 +53,6 @@ __all__ = [
     "authority_at_each_hop",
     "build_attack_path",
     "compute_request_authority",
+    # Graph Subpackage
+    "graph",
 ]

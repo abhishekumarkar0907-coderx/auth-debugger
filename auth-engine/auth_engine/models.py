@@ -45,6 +45,15 @@ class Verdict(enum.Enum):
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
 
 
+class FindingType(enum.Enum):
+    """Classification of the authorization finding."""
+
+    CONFUSED_DEPUTY = "CONFUSED_DEPUTY"
+    UNAUTHORIZED_DELEGATION = "UNAUTHORIZED_DELEGATION"
+    AUTHORIZATION_FAILURE = "AUTHORIZATION_FAILURE"
+    NONE = "NONE"
+
+
 class Severity(enum.Enum):
     """Placeholder severity for future policy-driven scoring."""
 
@@ -259,6 +268,7 @@ class Finding:
     evidence: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     severity: Severity = Severity.UNSCORED
+    finding_type: FindingType = FindingType.NONE
 
 
 @dataclass
