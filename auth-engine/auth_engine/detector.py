@@ -13,6 +13,7 @@ from .models import (
     AuthorizationScenario,
     DetectionResult,
     Finding,
+    FindingType,
     Operation,
     Severity,
     Verdict,
@@ -107,6 +108,7 @@ class ConfusedDeputyDetector:
                     "unauthorized permission expansion without a trusted "
                     f"delegation grant ({summary})"
                 ),
+                finding_type=FindingType.UNAUTHORIZED_DELEGATION,
                 reason_override=(
                     "Unauthorized permission expansion detected: "
                     f"{summary}. No matching trusted delegation grant authorizes "
@@ -157,6 +159,7 @@ class ConfusedDeputyDetector:
                 request_authority=request_authority,
                 required=required,
                 service_authority=service_authority,
+                finding_type=FindingType.CONFUSED_DEPUTY,
                 reason_suffix=(
                     "service used its own service-level authority to perform "
                     "the action on behalf of the initiating principal"
@@ -172,6 +175,7 @@ class ConfusedDeputyDetector:
             request_authority=request_authority,
             required=required,
             service_authority=service_authority,
+            finding_type=FindingType.AUTHORIZATION_FAILURE,
             reason_suffix=(
                 "neither the delegated request authority nor the service's "
                 "own authority includes the required permissions"
@@ -299,6 +303,7 @@ class ConfusedDeputyDetector:
         required: frozenset[str],
         service_authority: Authority | None,
         reason_suffix: str,
+        finding_type: FindingType,
         reason_override: str | None = None,
     ) -> DetectionResult:
         required_str = ", ".join(sorted(required))
@@ -319,6 +324,7 @@ class ConfusedDeputyDetector:
 
         finding = Finding(
             verdict=Verdict.DETECTED,
+            finding_type=finding_type,
             trace_id=scenario.trace_id,
             initiating_principal=scenario.initiating_principal,
             delegated_authority=request_authority,
@@ -368,6 +374,7 @@ class ConfusedDeputyDetector:
 
         finding = Finding(
             verdict=Verdict.NOT_DETECTED,
+            finding_type=FindingType.NONE,
             trace_id=scenario.trace_id,
             initiating_principal=scenario.initiating_principal,
             delegated_authority=request_authority,
@@ -401,6 +408,7 @@ class ConfusedDeputyDetector:
     ) -> DetectionResult:
         finding = Finding(
             verdict=Verdict.INSUFFICIENT_EVIDENCE,
+            finding_type=FindingType.NONE,
             trace_id=scenario.trace_id,
             initiating_principal=scenario.initiating_principal,
             reason=reason,

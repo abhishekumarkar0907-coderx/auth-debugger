@@ -9,6 +9,7 @@ from auth_engine.models import (
     DelegationStep,
     DetectionResult,
     Finding,
+    FindingType,
     Identity,
     Operation,
     PrincipalType,
@@ -259,6 +260,7 @@ class TestFinding:
         assert f.finding_id  # UUID auto-generated
         assert f.reason == ""
         assert f.severity == Severity.UNSCORED
+        assert f.finding_type == FindingType.NONE
 
     def test_with_values(self):
         f = Finding(
