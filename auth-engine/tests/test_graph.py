@@ -12,6 +12,9 @@ Covers synthetic tests for:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import Any
+
 import pytest
 
 from auth_engine.graph import (
@@ -29,10 +32,12 @@ from auth_engine.graph import (
     OperationNode,
     PrincipalNode,
     ServiceNode,
+    build_graph_from_spans,
     find_authority_amplification_hops,
     find_delegation_paths,
     query_cross_trace_history,
 )
+from auth_engine.policy import default_otel_demo_policy
 from auth_engine.models import (
     Authority,
     AuthoritySource,
@@ -720,3 +725,161 @@ class TestAuthorityAmplification:
         assert hops[0].from_principal_id == "user-123"
         assert hops[0].to_service_id == "payment-svc"
         assert hops[0].amplified_permissions == frozenset({"payments:charge"})
+
+
+# ---------------------------------------------------------------------------
+# 9. Graph Adapter Tests
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SpanStub:
+    """Minimal object satisfying SpanLike for adapter testing."""
+
+    trace_id: str
+    span_id: str
+    parent_span_id: str | None = None
+    service_name: str | None = None
+    span_name: str = "test-span"
+    status_code: int = 1
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+
+class TestGraphAdapter:
+    def test_build_graph_from_empty_spans(self):
+        graph = build_graph_from_spans([])
+        assert isinstance(graph, AuthorizationGraph)
+        assert graph.node_count == 0
+        assert graph.edge_count == 0
+
+    def test_build_graph_from_representative_spans(self):
+        root = SpanStub(
+            trace_id="trace-rep-001",
+            span_id="span-root",
+            service_name="checkout",
+            span_name="POST /order",
+            attributes={
+                "authz.principal.id": "user-123",
+                "authz.principal.type": "user",
+                "authz.principal.scopes": "orders:read",
+                "authz.delegation.from": "user-123",
+                "authz.delegation.to": "checkout-svc",
+                "authz.credential.type": "user_token",
+            },
+        )
+        leaf = SpanStub(
+            trace_id="trace-rep-001",
+            span_id="span-leaf",
+            parent_span_id="span-root",
+            service_name="payment",
+            span_name="oteldemo.PaymentService/Charge",
+            attributes={
+                "authz.principal.id": "user-123",
+                "authz.principal.scopes": "orders:read",
+                "authz.delegation.from": "checkout-svc",
+                "authz.delegation.to": "payment-svc",
+                "authz.credential.type": "service_credential",
+            },
+        )
+
+        graph = build_graph_from_spans(
+            [root, leaf],
+            policy=default_otel_demo_policy(),
+            service_authority_config={"payment": ["payments:charge"]},
+        )
+
+        assert isinstance(graph, AuthorizationGraph)
+        assert graph.has_node("user-123")
+        assert graph.has_node("checkout-svc")
+        assert graph.has_node("payment-svc")
+        assert graph.trace_ids() == ["trace-rep-001"]
+
+        # Verify delegation path queries operate on the constructed graph
+        paths = find_delegation_paths(graph, "user-123", "payments:charge")
+        assert len(paths) == 1
+        assert paths[0].path_nodes[0] == "user-123"
+        assert "checkout-svc" in paths[0].path_nodes
+        assert "payment-svc" in paths[0].path_nodes
+
+        # Verify amplification hop detection
+        hops = find_authority_amplification_hops(graph, trace_id="trace-rep-001")
+        assert len(hops) == 1
+        assert hops[0].from_principal_id == "checkout-svc"
+        assert hops[0].to_service_id == "payment-svc"
+
+    def test_build_graph_populates_existing_graph(self):
+        existing = AuthorizationGraph()
+        root = SpanStub(
+            trace_id="trace-rep-002",
+            span_id="span-root-2",
+            service_name="checkout",
+            span_name="POST /order",
+            attributes={
+                "authz.principal.id": "user-456",
+                "authz.principal.scopes": "orders:read",
+            },
+        )
+        leaf = SpanStub(
+            trace_id="trace-rep-002",
+            span_id="span-leaf-2",
+            parent_span_id="span-root-2",
+            service_name="payment",
+            span_name="oteldemo.PaymentService/Charge",
+            attributes={
+                "authz.principal.id": "user-456",
+                "authz.principal.scopes": "orders:read",
+            },
+        )
+
+        result = build_graph_from_spans([root, leaf], graph=existing)
+        assert result is existing
+        assert existing.has_node("user-456")
+
+    def test_build_graph_insufficient_evidence_non_strict(self):
+        plain = SpanStub(
+            trace_id="plain-trace",
+            span_id="s1",
+            service_name="svc",
+            span_name="GET /items",
+            attributes={"http.status_code": 200},
+        )
+        graph = build_graph_from_spans([plain], strict=False)
+        assert graph.node_count == 0
+
+    def test_build_graph_insufficient_evidence_strict_raises(self):
+        plain = SpanStub(
+            trace_id="plain-trace",
+            span_id="s1",
+            service_name="svc",
+            span_name="GET /items",
+            attributes={"http.status_code": 200},
+        )
+        with pytest.raises(ValueError, match="Cannot build AuthorizationScenario"):
+            build_graph_from_spans([plain], strict=True)
+
+    def test_build_graph_multi_trace(self):
+        span_a = SpanStub(
+            trace_id="trace-A",
+            span_id="sa-1",
+            service_name="svc-a",
+            span_name="oteldemo.OrderService/GetOrder",
+            attributes={
+                "authz.principal.id": "user-A",
+                "authz.principal.scopes": "orders:read",
+            },
+        )
+        span_b = SpanStub(
+            trace_id="trace-B",
+            span_id="sb-1",
+            service_name="svc-b",
+            span_name="oteldemo.OrderService/GetOrder",
+            attributes={
+                "authz.principal.id": "user-B",
+                "authz.principal.scopes": "orders:read",
+            },
+        )
+
+        graph = build_graph_from_spans([span_a, span_b])
+        assert graph.has_node("user-A")
+        assert graph.has_node("user-B")
+        assert set(graph.trace_ids()) == {"trace-A", "trace-B"}
