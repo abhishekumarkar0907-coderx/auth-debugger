@@ -1354,24 +1354,238 @@ class TestParseScopes:
         assert result == frozenset({"a", "b"})
 
     def test_empty_string(self):
-        assert _parse_scopes("") == frozenset()
+        assert _parse_scopes("") is None
+
 
     def test_empty_list(self):
         assert _parse_scopes([]) == frozenset()
 
     def test_malformed_json(self):
-        assert _parse_scopes("[broken") == frozenset()
+        assert _parse_scopes("[broken") is None
 
     def test_none(self):
-        assert _parse_scopes(None) == frozenset()
+        assert _parse_scopes(None) is None
 
     def test_integer(self):
-        assert _parse_scopes(42) == frozenset()
+        assert _parse_scopes(42) is None
 
     def test_whitespace_trimmed(self):
         result = _parse_scopes("  a , b , c  ")
         assert result == frozenset({"a", "b", "c"})
 
     def test_list_with_non_strings(self):
-        result = _parse_scopes(["a", 123, "b", None])
-        assert result == frozenset({"a", "b"})
+        assert _parse_scopes(["a", 123, "b", None]) is None
+
+    def test_empty_json_array(self):
+        assert _parse_scopes("[]") == frozenset()
+class TestDelegatedScopeSecurity:
+    """
+    Verify that delegation hops requiring explicit scopes never silently
+    fall back to the original principal's scopes when delegated scopes are
+    missing, empty, or malformed.
+    """
+
+    def test_missing_delegated_scopes_returns_insufficient_evidence(self):
+        """Hop with scopes_raw=None must yield INSUFFICIENT_EVIDENCE, not fallback."""
+        spans = [
+            FakeSpan(
+                span_id="s1",
+                span_name="POST /checkout",
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: "orders:read,payments:charge",
+                },
+            ),
+            FakeSpan(
+                span_id="s2",
+                parent_span_id="s1",
+                span_name="oteldemo.PaymentService/Charge",
+                service_name="payment",
+                attributes={
+                    ATTR_DELEGATION_FROM: "user-123",
+                    ATTR_DELEGATION_TO: "checkout-svc",
+                    ATTR_CREDENTIAL_TYPE: "user_token",
+                    # No ATTR_PRINCIPAL_SCOPES on delegation span -> scopes_raw is None
+                },
+            ),
+        ]
+        ctx = extract_authorization_context(spans)
+        policy = default_otel_demo_policy()
+        scenario = ctx.to_scenario(policy=policy)
+
+        assert len(scenario.delegation_chain) == 1
+        hop = scenario.delegation_chain[0]
+        assert hop.delegated_authority is None
+
+        detector = ConfusedDeputyDetector(policy=policy)
+        result = detector.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.delegated_authority is None
+        assert "Delegated authority cannot be established" in result.reason
+
+    def test_empty_delegated_scopes_returns_insufficient_evidence(self):
+        """Hop with empty scopes ('') must yield INSUFFICIENT_EVIDENCE, not fallback."""
+        spans = [
+            FakeSpan(
+                span_id="s1",
+                span_name="POST /checkout",
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: "orders:read,payments:charge",
+                },
+            ),
+            FakeSpan(
+                span_id="s2",
+                parent_span_id="s1",
+                span_name="oteldemo.PaymentService/Charge",
+                service_name="payment",
+                attributes={
+                    ATTR_DELEGATION_FROM: "user-123",
+                    ATTR_DELEGATION_TO: "checkout-svc",
+                    ATTR_CREDENTIAL_TYPE: "user_token",
+                    ATTR_PRINCIPAL_SCOPES: "",
+                },
+            ),
+        ]
+        ctx = extract_authorization_context(spans)
+        policy = default_otel_demo_policy()
+        scenario = ctx.to_scenario(policy=policy)
+
+        assert len(scenario.delegation_chain) == 1
+        hop = scenario.delegation_chain[0]
+        assert hop.delegated_authority is None
+
+        detector = ConfusedDeputyDetector(policy=policy)
+        result = detector.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.delegated_authority is None
+        assert "Delegated authority cannot be established" in result.reason
+
+    def test_malformed_delegated_scopes_returns_insufficient_evidence(self):
+        """Hop with malformed scopes ('[broken json') must yield INSUFFICIENT_EVIDENCE."""
+        spans = [
+            FakeSpan(
+                span_id="s1",
+                span_name="POST /checkout",
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: "orders:read,payments:charge",
+                },
+            ),
+            FakeSpan(
+                span_id="s2",
+                parent_span_id="s1",
+                span_name="oteldemo.PaymentService/Charge",
+                service_name="payment",
+                attributes={
+                    ATTR_DELEGATION_FROM: "user-123",
+                    ATTR_DELEGATION_TO: "checkout-svc",
+                    ATTR_CREDENTIAL_TYPE: "user_token",
+                    ATTR_PRINCIPAL_SCOPES: "[broken json",
+                },
+            ),
+        ]
+        ctx = extract_authorization_context(spans)
+        policy = default_otel_demo_policy()
+        scenario = ctx.to_scenario(policy=policy)
+
+        assert len(scenario.delegation_chain) == 1
+        hop = scenario.delegation_chain[0]
+        assert hop.delegated_authority is None
+
+        detector = ConfusedDeputyDetector(policy=policy)
+        result = detector.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.delegated_authority is None
+        assert "Delegated authority cannot be established" in result.reason
+
+    def test_valid_delegated_scopes_lacking_permission_preserves_detected(self):
+        """Valid scopes that do not include required permission must yield DETECTED."""
+        spans = [
+            FakeSpan(
+                span_id="s1",
+                span_name="POST /checkout",
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: "orders:read",
+                },
+            ),
+            FakeSpan(
+                span_id="s2",
+                parent_span_id="s1",
+                span_name="oteldemo.PaymentService/Charge",
+                service_name="payment",
+                attributes={
+                    ATTR_DELEGATION_FROM: "user-123",
+                    ATTR_DELEGATION_TO: "checkout-svc",
+                    ATTR_CREDENTIAL_TYPE: "user_token",
+                    ATTR_PRINCIPAL_SCOPES: "orders:read",
+                },
+            ),
+        ]
+        ctx = extract_authorization_context(
+            spans,
+            service_authority_config={"payment": ["payments:charge"]},
+        )
+        policy = default_otel_demo_policy()
+        scenario = ctx.to_scenario(policy=policy)
+
+        assert len(scenario.delegation_chain) == 1
+        hop = scenario.delegation_chain[0]
+        assert hop.delegated_authority is not None
+        assert hop.delegated_authority.permissions == frozenset({"orders:read"})
+
+        detector = ConfusedDeputyDetector(policy=policy)
+        result = detector.analyze(scenario)
+
+        assert result.verdict == Verdict.DETECTED
+        assert result.finding.verdict == Verdict.DETECTED
+        assert result.finding.delegated_authority is not None
+        assert result.finding.delegated_authority.permissions == frozenset({"orders:read"})
+        assert "payments:charge" in result.details["required_action"]
+        assert "orders:read" in result.details["request_authority"]
+
+    def test_original_principal_scopes_cannot_grant_additional_permission_across_hop(self):
+        """Original principal has payments:charge, but delegation hop only delegates orders:read.
+        Verify that payments:charge is not carried over, producing DETECTED."""
+        ctx = AuthorizationContext(
+            trace_id="trace-no-silent-elevation",
+            initiating_principal_id="user-123",
+            initiating_principal_type="user",
+            original_scopes=["orders:read", "payments:charge"],
+            effective_span_name="oteldemo.PaymentService/Charge",
+            effective_service="payment",
+            service_authority_permissions=["payments:charge"],
+            delegation_hops=[
+                RawDelegationHop(
+                    from_id="user-123",
+                    to_id="checkout-svc",
+                    credential_type_raw="user_token",
+                    scopes_raw="orders:read",
+                ),
+            ],
+        )
+        policy = default_otel_demo_policy()
+        scenario = ctx.to_scenario(policy=policy)
+
+        assert scenario.original_authority.permissions == frozenset({"orders:read", "payments:charge"})
+        assert len(scenario.delegation_chain) == 1
+        hop = scenario.delegation_chain[0]
+        assert hop.delegated_authority is not None
+        assert hop.delegated_authority.permissions == frozenset({"orders:read"})
+        assert "payments:charge" not in hop.delegated_authority.permissions
+
+        detector = ConfusedDeputyDetector(policy=policy)
+        result = detector.analyze(scenario)
+
+        assert result.verdict == Verdict.DETECTED
+        assert result.finding.verdict == Verdict.DETECTED
+        assert result.finding.delegated_authority is not None
+        assert result.finding.delegated_authority.permissions == frozenset({"orders:read"})
+        assert "payments:charge" not in result.finding.delegated_authority.permissions

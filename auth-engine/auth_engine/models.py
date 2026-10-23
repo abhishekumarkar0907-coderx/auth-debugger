@@ -167,7 +167,7 @@ class DelegationStep:
 
     from_principal: Identity
     to_principal: Identity
-    delegated_authority: Authority       # authority handed to the next hop
+    delegated_authority: Authority | None = None       # authority handed to the next hop
     credential_type: CredentialType = CredentialType.UNKNOWN
     explicit: bool = True                # False → implicit/inferred
 

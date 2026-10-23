@@ -291,6 +291,18 @@ class ConfusedDeputyDetector:
                 ),
             )
 
+        # Explicit delegation steps require established delegated authority.
+        for step in scenario.delegation_chain:
+            if step.explicit and step.delegated_authority is None:
+                return self._insufficient(
+                    scenario,
+                    reason=(
+                        f"Delegated authority cannot be established for hop "
+                        f"{step.from_principal} -> {step.to_principal}; "
+                        f"explicit scopes are missing, empty, or malformed"
+                    ),
+                )
+
         return None
 
     # ---- Result constructors --------------------------------------------

@@ -321,13 +321,14 @@ class AuthorizationContext:
                     cred_type = CredentialType(raw_ct)
 
             # Parse delegated scopes if available
-            delegated_perms: frozenset[str] = frozenset()
+            delegated_authority: Authority | None = None
             if hop.scopes_raw is not None:
                 delegated_perms = _parse_scopes(hop.scopes_raw)
-
-            # If no scopes on the hop, carry forward original authority
-            if not delegated_perms:
-                delegated_perms = frozenset(self.original_scopes or [])
+                if delegated_perms is not None:
+                    delegated_authority = Authority(
+                        permissions=delegated_perms,
+                        source=AuthoritySource.DELEGATED,
+                    )
 
             from_principal = Identity(
                 principal_id=hop.from_id,
@@ -342,10 +343,7 @@ class AuthorizationContext:
                 DelegationStep(
                     from_principal=from_principal,
                     to_principal=to_principal,
-                    delegated_authority=Authority(
-                        permissions=delegated_perms,
-                        source=AuthoritySource.DELEGATED,
-                    ),
+                    delegated_authority=delegated_authority,
                     credential_type=cred_type,
                     explicit=True,
                 )
@@ -399,7 +397,7 @@ class AuthorizationContext:
 # ---------------------------------------------------------------------------
 
 
-def _parse_scopes(raw: Any) -> frozenset[str]:
+def _parse_scopes(raw: Any) -> frozenset[str] | None:
     """
     Parse scopes from a span attribute value.
 
@@ -408,50 +406,76 @@ def _parse_scopes(raw: Any) -> frozenset[str]:
         - A JSON-encoded list of strings.
         - A Python list of strings (from OTel array attributes).
 
-    Returns a frozenset of scope strings.  Returns an empty frozenset
-    if the input is malformed.
+    Returns:
+        - ``frozenset[str]`` if scopes are valid (empty frozenset for explicitly
+          empty scope lists like ``[]`` or ``"[]"``).
+        - ``None`` if the input is missing, malformed, empty string, or contains
+          non-string/empty elements.
     """
-    if isinstance(raw, list):
-        # OTel array attribute — expect list of strings
+    if raw is None:
+        return None
+
+    if isinstance(raw, (list, tuple)):
+        # OTel array attribute — expect list/tuple of strings
+        if not raw:
+            return frozenset()
         result: list[str] = []
         for item in raw:
-            if isinstance(item, str) and item.strip():
-                result.append(item.strip())
+            if not isinstance(item, str):
+                return None  # mixed-type list is malformed
+            item_clean = item.strip()
+            if not item_clean:
+                return None  # empty scope element is malformed
+            result.append(item_clean)
         return frozenset(result)
 
     if isinstance(raw, str):
         trimmed = raw.strip()
         if not trimmed:
-            return frozenset()
+            return None  # empty or whitespace-only string is invalid
 
         # Try JSON array first
         if trimmed.startswith("["):
             try:
                 parsed = json.loads(trimmed)
-                if isinstance(parsed, list):
-                    return frozenset(
-                        s.strip() for s in parsed
-                        if isinstance(s, str) and s.strip()
-                    )
-            except (json.JSONDecodeError, TypeError):
-                return frozenset()  # malformed
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return None  # malformed JSON
+
+            if not isinstance(parsed, list):
+                return None
+
+            if not parsed:
+                return frozenset()
+
+            result = []
+            for item in parsed:
+                if not isinstance(item, str):
+                    return None  # mixed-type JSON array is malformed
+                item_clean = item.strip()
+                if not item_clean:
+                    return None  # empty scope element is malformed
+                result.append(item_clean)
+            return frozenset(result)
+
+        if trimmed.startswith("{"):
+            return None  # JSON object is not a valid scope list
 
         # Comma-separated
         if "," in trimmed:
-            return frozenset(
-                s.strip() for s in trimmed.split(",") if s.strip()
-            )
+            parts = [s.strip() for s in trimmed.split(",")]
+            if not all(parts):
+                return None  # empty token in comma-separated list
+            return frozenset(parts)
 
         # Space-separated
         if " " in trimmed:
-            return frozenset(
-                s.strip() for s in trimmed.split() if s.strip()
-            )
+            parts = trimmed.split()
+            return frozenset(parts)
 
         # Single scope
         return frozenset({trimmed})
 
-    return frozenset()
+    return None
 
 
 # ---------------------------------------------------------------------------

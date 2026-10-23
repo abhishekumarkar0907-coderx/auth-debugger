@@ -59,10 +59,13 @@ def compute_request_authority(
             # The delegated authority at this step becomes the new
             # request authority.  Authority may be narrowed OR
             # widened by explicit delegation.
-            current = Authority(
-                permissions=step.delegated_authority.permissions,
-                source=AuthoritySource.DELEGATED,
-            )
+            if step.delegated_authority is not None:
+                current = Authority(
+                    permissions=step.delegated_authority.permissions,
+                    source=AuthoritySource.DELEGATED,
+                )
+            else:
+                current = Authority.empty(AuthoritySource.DELEGATED)
         else:
             # Implicit (inferred) step: carry forward whatever was
             # available before.  The service's own authority is
@@ -84,7 +87,10 @@ def build_attack_path(
         path.append(str(initiating_principal))
 
     for step in delegation_chain:
-        perms = ", ".join(sorted(step.delegated_authority.permissions)) or "(none)"
+        if step.delegated_authority is not None:
+            perms = ", ".join(sorted(step.delegated_authority.permissions)) or "(none)"
+        else:
+            perms = "(unestablished)"
         label = (
             f"{step.from_principal} → {step.to_principal} "
             f"[{step.credential_type.value}] "
@@ -112,10 +118,13 @@ def authority_at_each_hop(
 
     for step in delegation_chain:
         if step.explicit:
-            current = Authority(
-                permissions=step.delegated_authority.permissions,
-                source=AuthoritySource.DELEGATED,
-            )
+            if step.delegated_authority is not None:
+                current = Authority(
+                    permissions=step.delegated_authority.permissions,
+                    source=AuthoritySource.DELEGATED,
+                )
+            else:
+                current = Authority.empty(AuthoritySource.DELEGATED)
         result.append((step.to_principal, current))
 
     return result
