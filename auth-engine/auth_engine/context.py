@@ -1036,10 +1036,12 @@ def _resolve_effective_action(
 
     # Resolve outcome from status_code
     # OTel status codes: 0 = UNSET, 1 = OK, 2 = ERROR
-    if leaf.status_code in (0, 1):
+    if leaf.status_code == 1:
         ctx.outcome_success = True
     elif leaf.status_code == 2:
         ctx.outcome_success = False
+    else:
+        ctx.outcome_success = None
 
     ctx.evidence.append(
         EvidenceItem(

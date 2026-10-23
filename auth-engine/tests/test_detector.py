@@ -500,3 +500,36 @@ def test_unauthorized_permission_expansion():
 
     assert len(expansions) == 1
     assert expansions[0]["permissions"] == ["admin:delete"]
+
+def test_later_trusted_grant_does_not_hide_earlier_expansion():
+    """A trusted later hop must not excuse an earlier unauthorized expansion."""
+    policy = DelegationPolicy()
+    policy.register(
+        "checkout-svc",
+        "payment-svc",
+        {"payments:charge"},
+    )
+    detector = ConfusedDeputyDetector(delegation_policy=policy)
+
+    scenario = legitimate_delegated_authorization()
+    first_step = scenario.delegation_chain[1]
+
+    # Introduce an unauthorized permission at agent -> checkout.
+    scenario.delegation_chain[1] = DelegationStep(
+        from_principal=first_step.from_principal,
+        to_principal=first_step.to_principal,
+        delegated_authority=Authority.delegated(
+            "orders:read", "admin:delete"
+        ),
+        credential_type=first_step.credential_type,
+        explicit=True,
+    )
+
+    result = detector.analyze(scenario)
+
+    assert result.verdict == Verdict.DETECTED
+    assert any(
+        item["from_principal"] == first_step.from_principal.principal_id
+        and "admin:delete" in item["permissions"]
+        for item in result.details["unauthorized_expansions"]
+    )

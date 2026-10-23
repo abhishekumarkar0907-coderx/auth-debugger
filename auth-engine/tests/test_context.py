@@ -173,6 +173,25 @@ class TestCompleteContext:
         assert "span-root" in ctx.span_ids
         assert "span-leaf" in ctx.span_ids
 
+    @pytest.mark.parametrize(
+        ("status_code", "expected_outcome"),
+        [(0, None), (1, True), (2, False), (3, None)],
+    )
+    def test_status_code_maps_to_outcome_and_preserves_evidence(
+        self, status_code, expected_outcome
+    ):
+        spans = _complete_span_set()
+        spans[-1].status_code = status_code
+
+        ctx = extract_authorization_context(spans)
+
+        assert ctx.outcome_success is expected_outcome
+        outcome_evidence = [item for item in ctx.evidence if item.field == "outcome"]
+        assert len(outcome_evidence) == 1
+        assert outcome_evidence[0].value == status_code
+        assert outcome_evidence[0].source == "span_field:status_code"
+        assert outcome_evidence[0].span_id == "span-leaf"
+
 
 # ===================================================================
 # 2. MISSING PRINCIPAL IDENTITY
