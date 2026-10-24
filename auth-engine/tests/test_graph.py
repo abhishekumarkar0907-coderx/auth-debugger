@@ -883,3 +883,31 @@ class TestGraphAdapter:
         assert graph.has_node("user-A")
         assert graph.has_node("user-B")
         assert set(graph.trace_ids()) == {"trace-A", "trace-B"}
+
+def test_graph_json_save_load_round_trip(tmp_path):
+    graph = AuthorizationGraph()
+    identity = Identity("json-user", PrincipalType.USER)
+    node = PrincipalNode.from_identity(
+        identity, authority=Authority.original("orders:read")
+    )
+    graph.add_node(node)
+
+    snapshot = tmp_path / "graph.json"
+    graph.save_json(snapshot)
+    loaded = AuthorizationGraph.load_json(snapshot)
+
+    assert loaded.node_count == graph.node_count
+    assert loaded.get_node("json-user") == node
+
+
+def test_graph_json_rejects_unsupported_schema(tmp_path):
+    import json
+
+    snapshot = tmp_path / "invalid.json"
+    snapshot.write_text(
+        json.dumps({"schema_version": 999, "nodes": [], "edges": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="schema_version"):
+        AuthorizationGraph.load_json(snapshot)
