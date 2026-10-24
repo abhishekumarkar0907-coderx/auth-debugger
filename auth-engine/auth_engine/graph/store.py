@@ -32,6 +32,23 @@ from .models import (
 )
 
 
+
+import json
+import os
+import tempfile
+from dataclasses import fields, is_dataclass
+from enum import Enum
+from pathlib import Path as FilePath
+
+from auth_engine.models import (
+    AuthoritySource, CredentialType, DelegationStep,
+)
+from .models import (
+    GraphNode, PrincipalNode, ServiceNode, OperationNode,
+    GraphEdge, DelegationEdge, InvocationEdge, ExecutionEdge,
+)
+
+
 class AuthorizationGraph:
     """
     In-memory directed authorization graph.
@@ -378,6 +395,53 @@ class AuthorizationGraph:
                 )
             )
 
+
+    def save_json(self, path: str | FilePath) -> None:
+        """Atomically save this graph as a versioned JSON snapshot."""
+        payload = {
+            "schema_version": 1,
+            "nodes": [_encode_value(n) for n in self.nodes()],
+            "edges": [_encode_value(e) for e in self._edges],
+        }
+        destination = FilePath(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=destination.parent,
+                delete=False, suffix=".tmp"
+            ) as handle:
+                temporary = handle.name
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            os.replace(temporary, destination)
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
+
+    @classmethod
+    def load_json(cls, path: str | FilePath) -> "AuthorizationGraph":
+        """Load and validate a version-1 JSON graph snapshot."""
+        with FilePath(path).open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            raise ValueError("Unsupported or missing graph schema_version")
+        if not isinstance(payload.get("nodes"), list) or not isinstance(payload.get("edges"), list):
+            raise ValueError("Graph snapshot must contain nodes and edges arrays")
+
+        graph = cls()
+        for item in payload["nodes"]:
+            node = _decode_value(item)
+            if not isinstance(node, GraphNode):
+                raise ValueError("Snapshot contains an invalid graph node")
+            graph.add_node(node, overwrite=True)
+        for item in payload["edges"]:
+            edge = _decode_value(item)
+            if not isinstance(edge, GraphEdge):
+                raise ValueError("Snapshot contains an invalid graph edge")
+            graph.add_edge(edge)
+        return graph
+
     def clear(self) -> None:
         """Clear all nodes and edges from the graph."""
         self._nodes.clear()
@@ -445,3 +509,60 @@ class AuthorizationGraph:
             )
 
         return True
+
+
+_GRAPH_TYPES = {
+    cls.__name__: cls
+    for cls in (
+        Authority, Identity, Operation, DelegationStep,
+        GraphNode, PrincipalNode, ServiceNode, OperationNode,
+        GraphEdge, DelegationEdge, InvocationEdge, ExecutionEdge,
+    )
+}
+_GRAPH_ENUMS = {
+    cls.__name__: cls
+    for cls in (
+        AuthoritySource, CredentialType, PrincipalType, NodeType, EdgeType,
+    )
+}
+
+def _encode_value(value):
+    if isinstance(value, Enum):
+        return {"__enum__": type(value).__name__, "value": value.value}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "__type__": type(value).__name__,
+            "fields": {f.name: _encode_value(getattr(value, f.name)) for f in fields(value)},
+        }
+    if isinstance(value, frozenset):
+        return {"__frozenset__": [_encode_value(v) for v in sorted(value, key=str)]}
+    if isinstance(value, set):
+        return {"__set__": [_encode_value(v) for v in sorted(value, key=str)]}
+    if isinstance(value, dict):
+        return {str(k): _encode_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_encode_value(v) for v in value]
+    return value
+
+def _decode_value(value):
+    if isinstance(value, list):
+        return [_decode_value(v) for v in value]
+    if isinstance(value, dict):
+        if "__enum__" in value:
+            enum_cls = _GRAPH_ENUMS.get(value["__enum__"])
+            if enum_cls is None:
+                raise ValueError("Unknown enum in graph snapshot")
+            return enum_cls(value["value"])
+        if "__frozenset__" in value:
+            return frozenset(_decode_value(v) for v in value["__frozenset__"])
+        if "__set__" in value:
+            return set(_decode_value(v) for v in value["__set__"])
+        if "__type__" in value:
+            cls = _GRAPH_TYPES.get(value["__type__"])
+            if cls is None:
+                raise ValueError("Unknown type in graph snapshot")
+            return cls(**{
+                k: _decode_value(v) for k, v in value["fields"].items()
+            })
+        return {k: _decode_value(v) for k, v in value.items()}
+    return value
