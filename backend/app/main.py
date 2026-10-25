@@ -7,7 +7,8 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from .otlp import normalize_traces
 from .schemas import IngestResponse, SpanRecord, TraceSummary
 from .store import InMemorySpanStore
-
+from auth_engine.graph.adapter import build_graph_from_spans
+from auth_engine.graph import find_authority_amplification_hops
 
 app = FastAPI(
     title="Authorization Debugger Backend",
@@ -48,6 +49,43 @@ async def get_trace(trace_id: str) -> list[SpanRecord]:
     if not spans:
         raise HTTPException(status_code=404, detail="Trace not found")
     return spans
+
+
+@app.get("/api/v1/traces/{trace_id}/graph")
+async def get_trace_graph(trace_id: str) -> dict[str, object]:
+    """Build a graph using only spans observed for this trace."""
+    from dataclasses import fields, is_dataclass
+    from enum import Enum
+
+    spans = store.trace(trace_id)
+    if not spans:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    def json_safe(value: object) -> object:
+        if isinstance(value, Enum):
+            return value.value
+        if is_dataclass(value) and not isinstance(value, type):
+            return {
+                field.name: json_safe(getattr(value, field.name))
+                for field in fields(value)
+            }
+        if isinstance(value, dict):
+            return {str(k): json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [json_safe(v) for v in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    graph = build_graph_from_spans(spans)
+    hops = find_authority_amplification_hops(graph, trace_id=trace_id)
+
+    return {
+        "trace_id": trace_id,
+        "nodes": json_safe(graph.nodes()),
+        "edges": json_safe(graph.edges()),
+        "authority_amplification_hops": json_safe(hops),
+    }
 
 
 @app.post(
