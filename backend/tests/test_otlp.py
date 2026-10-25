@@ -8,6 +8,8 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
 )
 
 from app.main import app, store
+from app.schemas import SpanRecord
+from app.store import InMemorySpanStore
 
 
 client = TestClient(app)
@@ -91,6 +93,7 @@ def test_otlp_ingestion() -> None:
     assert record["span_name"] == "GET /api/test"
     assert record["duration_ms"] == 25.0
 
+
 def test_trace_graph_endpoint() -> None:
     store._spans.clear()
 
@@ -132,3 +135,82 @@ def test_graph_endpoint_reports_empty_hops_for_simple_trace() -> None:
     assert data["nodes"]
     assert data["edges"]
     assert data["authority_amplification_hops"] == []
+
+
+def test_empty_otlp_payload_returns_400() -> None:
+    response = client.post(
+        "/v1/traces",
+        content=b"",
+        headers={"content-type": "application/x-protobuf"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Empty request body"
+
+
+def test_unsupported_content_type_returns_415() -> None:
+    response = client.post(
+        "/v1/traces",
+        content=b"some payload",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 415
+    assert "OTLP protobuf" in response.json()["detail"]
+
+
+def test_malformed_protobuf_returns_400() -> None:
+    response = client.post(
+        "/v1/traces",
+        content=b"\xff\xff\xff",
+        headers={"content-type": "application/x-protobuf"},
+    )
+
+    assert response.status_code == 400
+    assert "Invalid OTLP trace payload" in response.json()["detail"]
+
+
+def test_unknown_trace_returns_404() -> None:
+    response = client.get(
+        "/api/v1/traces/ffffffffffffffffffffffffffffffff"
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Trace not found"
+
+
+def test_same_span_id_in_different_traces_is_preserved() -> None:
+    test_store = InMemorySpanStore(max_spans=10)
+
+    first = SpanRecord(
+        trace_id="trace-a",
+        span_id="same-span",
+        span_name="first",
+        start_time_unix_nano=100,
+        end_time_unix_nano=200,
+        duration_ms=0.0001,
+        span_kind=1,
+        status_code=0,
+    )
+    second = SpanRecord(
+        trace_id="trace-b",
+        span_id="same-span",
+        span_name="second",
+        start_time_unix_nano=300,
+        end_time_unix_nano=500,
+        duration_ms=0.0002,
+        span_kind=1,
+        status_code=0,
+    )
+
+    test_store.add(first)
+    test_store.add(second)
+
+    assert test_store.count() == 2
+    assert [span.span_name for span in test_store.trace("trace-a")] == [
+        "first"
+    ]
+    assert [span.span_name for span in test_store.trace("trace-b")] == [
+        "second"
+    ]
+

@@ -12,6 +12,7 @@ from auth_engine.models import (
     CredentialType,
     DelegationStep,
     Finding,
+    FindingType,
     Identity,
     Operation,
     PrincipalType,
@@ -79,6 +80,10 @@ class TestGoldenConfusedDeputy:
         result = DETECTOR.analyze(golden_confused_deputy())
         assert result.finding.severity == Severity.HIGH
 
+    def test_finding_type(self):
+        result = DETECTOR.analyze(golden_confused_deputy())
+        assert result.finding.finding_type == FindingType.CONFUSED_DEPUTY
+
     def test_finding_has_attack_path(self):
         result = DETECTOR.analyze(golden_confused_deputy())
         assert len(result.finding.attack_path) > 0
@@ -127,6 +132,10 @@ class TestLegitimateDirectAuthorization:
     def test_reason(self):
         result = DETECTOR.analyze(legitimate_direct_authorization())
         assert "legitimately authorized" in result.reason
+
+    def test_finding_type(self):
+        result = DETECTOR.analyze(legitimate_direct_authorization())
+        assert result.finding.finding_type == FindingType.NONE
 
 
 # ===================================================================
@@ -206,6 +215,10 @@ class TestMissingInitiatingIdentity:
     def test_reason(self):
         result = DETECTOR.analyze(missing_initiating_identity())
         assert "initiating principal" in result.reason.lower()
+
+    def test_finding_type(self):
+        result = DETECTOR.analyze(missing_initiating_identity())
+        assert result.finding.finding_type == FindingType.NONE
 
 
 # ===================================================================
@@ -487,6 +500,7 @@ def test_unauthorized_permission_expansion():
     result = DETECTOR.analyze(scenario)
 
     assert result.verdict == Verdict.DETECTED
+    assert result.finding.finding_type == FindingType.UNAUTHORIZED_DELEGATION
 
     # The finding must preserve the actual operation's requirements.
     assert result.finding.required_authority == frozenset(
@@ -500,3 +514,82 @@ def test_unauthorized_permission_expansion():
 
     assert len(expansions) == 1
     assert expansions[0]["permissions"] == ["admin:delete"]
+
+def test_later_trusted_grant_does_not_hide_earlier_expansion():
+    """A trusted later hop must not excuse an earlier unauthorized expansion."""
+    policy = DelegationPolicy()
+    policy.register(
+        "checkout-svc",
+        "payment-svc",
+        {"payments:charge"},
+    )
+    detector = ConfusedDeputyDetector(delegation_policy=policy)
+
+    scenario = legitimate_delegated_authorization()
+    first_step = scenario.delegation_chain[1]
+
+    # Introduce an unauthorized permission at agent -> checkout.
+    scenario.delegation_chain[1] = DelegationStep(
+        from_principal=first_step.from_principal,
+        to_principal=first_step.to_principal,
+        delegated_authority=Authority.delegated(
+            "orders:read", "admin:delete"
+        ),
+        credential_type=first_step.credential_type,
+        explicit=True,
+    )
+
+    result = detector.analyze(scenario)
+
+    assert result.verdict == Verdict.DETECTED
+    assert any(
+        item["from_principal"] == first_step.from_principal.principal_id
+        and "admin:delete" in item["permissions"]
+        for item in result.details["unauthorized_expansions"]
+    )
+
+
+def test_missing_authority_is_reported_as_authorization_failure():
+    scenario = AuthorizationScenario(
+        trace_id="trace-no-authority",
+        initiating_principal=USER_123,
+        original_authority=Authority.original("orders:read"),
+        delegation_chain=[],
+        effective_operation=Operation(
+            service="payment-svc",
+            raw_span_name="oteldemo.PaymentService/Charge",
+            semantic_action="payments:charge",
+            target_resource=None,
+            required_authority=frozenset({"payments:charge"}),
+        ),
+        acting_service_authority=Authority.service("orders:read"),
+    )
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.DETECTED
+    assert "neither the delegated request authority" in result.reason
+    assert result.finding.finding_type == FindingType.AUTHORIZATION_FAILURE
+
+
+def test_neither_authority_has_required_permission():
+    scenario = AuthorizationScenario(
+        trace_id="trace-no-authority",
+        initiating_principal=USER_123,
+        original_authority=Authority.original("orders:read"),
+        delegation_chain=[],
+        effective_operation=Operation(
+            service="payment-svc",
+            raw_span_name="oteldemo.PaymentService/Charge",
+            semantic_action="payments:charge",
+            target_resource=None,
+            required_authority=frozenset({"payments:charge"}),
+        ),
+        acting_service_authority=Authority.service("orders:read"),
+    )
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.DETECTED
+    assert "neither the delegated request authority" in result.reason
+    assert result.details["service_authority"] == ["orders:read"]

@@ -11,6 +11,7 @@ from .models import (
     DelegationStep,
     DetectionResult,
     Finding,
+    FindingType,
     Identity,
     Operation,
     PrincipalType,
@@ -36,6 +37,7 @@ __all__ = [
     "DelegationStep",
     "DetectionResult",
     "Finding",
+    "FindingType",
     "Identity",
     "Operation",
     "PrincipalType",
@@ -54,4 +56,3 @@ __all__ = [
     # Graph Subpackage
     "graph",
 ]
-

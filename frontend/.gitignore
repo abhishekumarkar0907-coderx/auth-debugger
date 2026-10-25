@@ -1,0 +1,19 @@
+# Logs and build output
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

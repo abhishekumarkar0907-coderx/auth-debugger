@@ -45,6 +45,7 @@ from auth_engine.context import (
     _parse_scopes,
 )
 from auth_engine.detector import ConfusedDeputyDetector
+from auth_engine.delegation_policy import DelegationPolicy
 from auth_engine.models import (
     Authority,
     AuthorizationScenario,
@@ -171,6 +172,25 @@ class TestCompleteContext:
         ctx = extract_authorization_context(_complete_span_set())
         assert "span-root" in ctx.span_ids
         assert "span-leaf" in ctx.span_ids
+
+    @pytest.mark.parametrize(
+        ("status_code", "expected_outcome"),
+        [(0, None), (1, True), (2, False), (3, None)],
+    )
+    def test_status_code_maps_to_outcome_and_preserves_evidence(
+        self, status_code, expected_outcome
+    ):
+        spans = _complete_span_set()
+        spans[-1].status_code = status_code
+
+        ctx = extract_authorization_context(spans)
+
+        assert ctx.outcome_success is expected_outcome
+        outcome_evidence = [item for item in ctx.evidence if item.field == "outcome"]
+        assert len(outcome_evidence) == 1
+        assert outcome_evidence[0].value == status_code
+        assert outcome_evidence[0].source == "span_field:status_code"
+        assert outcome_evidence[0].span_id == "span-leaf"
 
 
 # ===================================================================
@@ -1111,7 +1131,15 @@ class TestDetectorPreservation:
     def test_all_fixtures_unchanged(self):
         from tests.fixtures import ALL_FIXTURES
 
-        detector = ConfusedDeputyDetector()
+        delegation_policy = DelegationPolicy()
+        delegation_policy.register(
+            "checkout-svc",
+            "payment-svc",
+            {"payments:charge"},
+        )
+        detector = ConfusedDeputyDetector(
+            delegation_policy=delegation_policy
+        )
         for name, (factory, expected) in ALL_FIXTURES.items():
             result = detector.analyze(factory())
             assert result.verdict == expected, (

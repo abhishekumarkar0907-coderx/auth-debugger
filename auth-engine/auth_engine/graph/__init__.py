@@ -6,6 +6,7 @@ tracing delegation paths across microservices and AI agents, and detecting
 confused-deputy authority amplification hops.
 """
 
+from .adapter import build_graph_from_spans
 from .models import (
     DelegationEdge,
     EdgeType,
@@ -51,4 +52,6 @@ __all__ = [
     "DelegationPath",
     "CrossTraceHistory",
     "AmplificationHop",
+    # Adapter
+    "build_graph_from_spans",
 ]

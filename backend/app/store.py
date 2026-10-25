@@ -15,11 +15,12 @@ class InMemorySpanStore:
 
     def __init__(self, max_spans: int = 5000) -> None:
         self.max_spans = max_spans
-        self._spans: OrderedDict[str, SpanRecord] = OrderedDict()
+        self._spans: OrderedDict[tuple[str, str], SpanRecord] = OrderedDict()
 
     def add(self, span: SpanRecord) -> None:
-        self._spans[span.span_id] = span
-        self._spans.move_to_end(span.span_id)
+        key = (span.trace_id, span.span_id)
+        self._spans[key] = span
+        self._spans.move_to_end(key)
 
         while len(self._spans) > self.max_spans:
             self._spans.popitem(last=False)
