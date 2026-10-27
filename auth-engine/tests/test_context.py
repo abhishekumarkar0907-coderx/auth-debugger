@@ -31,6 +31,7 @@ import pytest
 from auth_engine.context import (
     ATTR_CREDENTIAL_TYPE,
     ATTR_DELEGATION_FROM,
+    ATTR_DELEGATION_SCOPES,
     ATTR_DELEGATION_TO,
     ATTR_ENDUSER_ID,
     ATTR_PRINCIPAL_ID,
@@ -98,6 +99,7 @@ def _complete_span_set() -> list[FakeSpan]:
             ATTR_DELEGATION_FROM: "user-123",
             ATTR_DELEGATION_TO: "checkout-svc",
             ATTR_CREDENTIAL_TYPE: "user_token",
+            ATTR_DELEGATION_SCOPES: "orders:read",
         },
     )
     leaf = FakeSpan(
@@ -114,6 +116,7 @@ def _complete_span_set() -> list[FakeSpan]:
             ATTR_DELEGATION_FROM: "checkout-svc",
             ATTR_DELEGATION_TO: "payment-svc",
             ATTR_CREDENTIAL_TYPE: "service_credential",
+            ATTR_DELEGATION_SCOPES: "orders:read",
         },
     )
     return [root, leaf]
@@ -1035,6 +1038,54 @@ class TestEnduserIdHandling:
 class TestContextToScenario:
     """Full round-trip: spans → context → scenario → detector."""
 
+    def test_missing_delegated_scopes_are_not_inferred_from_original_authority(self):
+        """Missing delegation scopes must not silently inherit all user scopes."""
+        spans = [
+            FakeSpan(
+                span_id="span-1",
+                span_name="POST /checkout",
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: "orders:read,admin:delete",
+                    ATTR_DELEGATION_FROM: "user-123",
+                    ATTR_DELEGATION_TO: "checkout-service",
+                },
+            )
+        ]
+
+        ctx = extract_authorization_context(spans)
+        scenario = ctx.to_scenario()
+
+        assert len(scenario.delegation_chain) == 1
+        delegated_permissions = (
+            scenario.delegation_chain[0].delegated_authority.permissions
+        )
+
+        assert "admin:delete" not in delegated_permissions
+
+    def test_delegated_scopes_are_extracted_from_span_attributes(self):
+        spans = [
+            FakeSpan(
+                span_id="span-1",
+                span_name="POST /checkout",
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: "orders:read,admin:delete",
+                    ATTR_DELEGATION_FROM: "user-123",
+                    ATTR_DELEGATION_TO: "checkout-service",
+                    ATTR_DELEGATION_SCOPES: "orders:read",
+                },
+            )
+        ]
+
+        ctx = extract_authorization_context(spans)
+        scenario = ctx.to_scenario()
+
+        assert len(scenario.delegation_chain) == 1
+        assert scenario.delegation_chain[0].delegated_authority.permissions == {
+            "orders:read"
+        }
+
     def test_confused_deputy_detected(self):
         """Reproduce the golden confused-deputy scenario via extraction."""
         spans = _complete_span_set()
@@ -1279,6 +1330,7 @@ class TestNoFalsePositiveFromIncompleteEvidence:
         with pytest.raises(ValueError):
             ctx.to_scenario()
 
+
     def test_missing_principal_no_detection(self):
         """Scopes present but no principal → cannot build scenario."""
         spans = [
@@ -1318,6 +1370,65 @@ class TestNoFalsePositiveFromIncompleteEvidence:
         assert not ctx.has_sufficient_evidence()
         with pytest.raises(ValueError):
             ctx.to_scenario()
+
+
+class TestDelegationScopeEvidence:
+    """Missing, malformed, and explicitly empty scopes remain distinct."""
+
+    @staticmethod
+    def _extract_delegation(scopes: Any = ...) -> AuthorizationContext:
+        attributes = {
+            ATTR_PRINCIPAL_ID: "user-123",
+            ATTR_PRINCIPAL_SCOPES: "orders:read",
+            ATTR_DELEGATION_FROM: "user-123",
+            ATTR_DELEGATION_TO: "payment-svc",
+        }
+        if scopes is not ...:
+            attributes[ATTR_DELEGATION_SCOPES] = scopes
+
+        span = FakeSpan(
+            span_name="oteldemo.PaymentService/Charge",
+            service_name="payment",
+            attributes=attributes,
+        )
+        return extract_authorization_context([span])
+
+    def test_missing_delegation_scopes_remain_unknown(self):
+        context = self._extract_delegation()
+        scenario = context.to_scenario(policy=default_otel_demo_policy())
+
+        step = scenario.delegation_chain[0]
+        assert step.scopes_known is False
+        assert step.delegated_authority.permissions == frozenset()
+        assert any(
+            warning.field == "delegation.scopes"
+            and warning.warning_type == "missing"
+            for warning in context.warnings
+        )
+
+    def test_malformed_delegation_scopes_remain_unknown(self):
+        context = self._extract_delegation("[not valid json")
+        scenario = context.to_scenario(policy=default_otel_demo_policy())
+
+        step = scenario.delegation_chain[0]
+        assert step.scopes_known is False
+        assert step.delegated_authority.permissions == frozenset()
+        assert any(
+            warning.field == "delegation.scopes"
+            and warning.warning_type == "malformed"
+            for warning in context.warnings
+        )
+
+    def test_explicitly_empty_delegation_scopes_are_known(self):
+        context = self._extract_delegation([])
+        scenario = context.to_scenario(policy=default_otel_demo_policy())
+
+        step = scenario.delegation_chain[0]
+        assert step.scopes_known is True
+        assert step.delegated_authority.permissions == frozenset()
+
+        result = ConfusedDeputyDetector().analyze(scenario)
+        assert result.verdict == Verdict.DETECTED
 
 
 # ===================================================================

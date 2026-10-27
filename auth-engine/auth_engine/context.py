@@ -69,6 +69,7 @@ ATTR_PRINCIPAL_TYPE = "authz.principal.type"
 ATTR_PRINCIPAL_SCOPES = "authz.principal.scopes"
 ATTR_DELEGATION_FROM = "authz.delegation.from"
 ATTR_DELEGATION_TO = "authz.delegation.to"
+ATTR_DELEGATION_SCOPES = "authz.delegation.scopes"
 ATTR_CREDENTIAL_TYPE = "authz.credential.type"
 ATTR_TARGET_RESOURCE = "authz.target.resource"
 
@@ -320,14 +321,8 @@ class AuthorizationContext:
                 if raw_ct in _VALID_CREDENTIAL_TYPES:
                     cred_type = CredentialType(raw_ct)
 
-            # Parse delegated scopes if available
-            delegated_perms: frozenset[str] = frozenset()
-            if hop.scopes_raw is not None:
-                delegated_perms = _parse_scopes(hop.scopes_raw)
-
-            # If no scopes on the hop, carry forward original authority
-            if not delegated_perms:
-                delegated_perms = frozenset(self.original_scopes or [])
+            # Parse delegated scopes and preserve whether the evidence is valid.
+            delegated_perms, scopes_known = _parse_scopes_checked(hop.scopes_raw)
 
             from_principal = Identity(
                 principal_id=hop.from_id,
@@ -348,6 +343,7 @@ class AuthorizationContext:
                     ),
                     credential_type=cred_type,
                     explicit=True,
+                    scopes_known=scopes_known,
                 )
             )
 
@@ -400,58 +396,91 @@ class AuthorizationContext:
 
 
 def _parse_scopes(raw: Any) -> frozenset[str]:
+    """Parse scope values without raising on malformed telemetry.
+
+    Invalid or missing input returns an empty set for compatibility.
+    Callers must separately track whether the scope evidence is valid.
     """
-    Parse scopes from a span attribute value.
+    if raw is None:
+        return frozenset()
 
-    Accepts:
-        - A comma-separated or space-separated string.
-        - A JSON-encoded list of strings.
-        - A Python list of strings (from OTel array attributes).
+    if isinstance(raw, list):
+        return frozenset(
+            item.strip()
+            for item in raw
+            if isinstance(item, str) and item.strip()
+        )
 
-    Returns a frozenset of scope strings.  Returns an empty frozenset
-    if the input is malformed.
+    if not isinstance(raw, str):
+        return frozenset()
+
+    trimmed = raw.strip()
+    if not trimmed:
+        return frozenset()
+
+    if trimmed.startswith("["):
+        try:
+            parsed = json.loads(trimmed)
+        except json.JSONDecodeError:
+            return frozenset()
+        if not isinstance(parsed, list):
+            return frozenset()
+        if any(not isinstance(item, str) or not item.strip() for item in parsed):
+            return frozenset()
+        return frozenset(item.strip() for item in parsed)
+
+    if "," in trimmed:
+        parts = [part.strip() for part in trimmed.split(",")]
+        if any(not part for part in parts):
+            return frozenset()
+        return frozenset(parts)
+
+    if " " in trimmed:
+        return frozenset(trimmed.split())
+
+    return frozenset({trimmed})
+
+
+def _parse_scopes_checked(raw: Any) -> tuple[frozenset[str], bool]:
+    """Parse scopes and indicate whether the raw value is valid evidence.
+
+    An explicitly empty list is valid evidence of an empty grant.
+    Missing, blank, malformed, or incorrectly typed values are unknown.
     """
     if isinstance(raw, list):
-        # OTel array attribute — expect list of strings
-        result: list[str] = []
-        for item in raw:
-            if isinstance(item, str) and item.strip():
-                result.append(item.strip())
-        return frozenset(result)
+        if any(not isinstance(item, str) or not item.strip() for item in raw):
+            return frozenset(), False
+        return frozenset(item.strip() for item in raw), True
 
-    if isinstance(raw, str):
-        trimmed = raw.strip()
-        if not trimmed:
-            return frozenset()
+    if not isinstance(raw, str) or not raw.strip():
+        return frozenset(), False
 
-        # Try JSON array first
-        if trimmed.startswith("["):
-            try:
-                parsed = json.loads(trimmed)
-                if isinstance(parsed, list):
-                    return frozenset(
-                        s.strip() for s in parsed
-                        if isinstance(s, str) and s.strip()
-                    )
-            except (json.JSONDecodeError, TypeError):
-                return frozenset()  # malformed
+    trimmed = raw.strip()
 
-        # Comma-separated
-        if "," in trimmed:
-            return frozenset(
-                s.strip() for s in trimmed.split(",") if s.strip()
-            )
+    if trimmed.startswith("["):
+        try:
+            parsed = json.loads(trimmed)
+        except json.JSONDecodeError:
+            return frozenset(), False
 
-        # Space-separated
-        if " " in trimmed:
-            return frozenset(
-                s.strip() for s in trimmed.split() if s.strip()
-            )
+        if not isinstance(parsed, list):
+            return frozenset(), False
 
-        # Single scope
-        return frozenset({trimmed})
+        if any(not isinstance(item, str) or not item.strip() for item in parsed):
+            return frozenset(), False
 
-    return frozenset()
+        return frozenset(item.strip() for item in parsed), True
+
+    if "," in trimmed:
+        parts = [part.strip() for part in trimmed.split(",")]
+        if any(not part for part in parts):
+            return frozenset(), False
+        return frozenset(parts), True
+
+    if " " in trimmed:
+        return frozenset(trimmed.split()), True
+
+    return frozenset({trimmed}), True
 
 
 # ---------------------------------------------------------------------------
@@ -565,8 +594,14 @@ def extract_authorization_context(
         deleg_from = attrs.get(ATTR_DELEGATION_FROM)
         deleg_to = attrs.get(ATTR_DELEGATION_TO)
         cred_type = attrs.get(ATTR_CREDENTIAL_TYPE)
+        deleg_scopes = attrs.get(ATTR_DELEGATION_SCOPES)
 
-        if deleg_from is not None or deleg_to is not None or cred_type is not None:
+        if (
+            deleg_from is not None
+            or deleg_to is not None
+            or cred_type is not None
+            or deleg_scopes is not None
+        ):
             hop = RawDelegationHop(
                 from_id=(
                     deleg_from.strip()
@@ -583,6 +618,7 @@ def extract_authorization_context(
                     if isinstance(cred_type, str) and cred_type.strip()
                     else None
                 ),
+                scopes_raw=deleg_scopes,
                 span_id=span.span_id,
             )
             delegation_hops.append(hop)
@@ -990,6 +1026,35 @@ def _resolve_delegation(
                     source=f"span_attribute:{ATTR_CREDENTIAL_TYPE}",
                     span_id=hop.span_id,
                     confidence="explicit",
+                )
+            )
+
+        scopes, scopes_known = _parse_scopes_checked(hop.scopes_raw)
+
+        if scopes_known:
+            ctx.evidence.append(
+                EvidenceItem(
+                    field="delegation.scopes",
+                    value=sorted(scopes),
+                    source=f"span_attribute:{ATTR_DELEGATION_SCOPES}",
+                    span_id=hop.span_id,
+                    confidence="explicit",
+                )
+            )
+        else:
+            warning_type = (
+                "missing" if hop.scopes_raw is None else "malformed"
+            )
+            ctx.warnings.append(
+                ExtractionWarning(
+                    field="delegation.scopes",
+                    warning_type=warning_type,
+                    message=(
+                        f"Delegation scopes {warning_type} on span "
+                        f"{hop.span_id}; authorization cannot be inferred "
+                        "from this hop"
+                    ),
+                    sources=[ATTR_DELEGATION_SCOPES],
                 )
             )
 

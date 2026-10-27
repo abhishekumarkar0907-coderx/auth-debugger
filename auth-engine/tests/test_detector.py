@@ -593,3 +593,194 @@ def test_neither_authority_has_required_permission():
     assert result.verdict == Verdict.DETECTED
     assert "neither the delegated request authority" in result.reason
     assert result.details["service_authority"] == ["orders:read"]
+
+
+def test_restoring_removed_permission_without_grant_is_unauthorized():
+    """A later hop cannot restore initially authorized but removed permission."""
+    scenario = legitimate_delegated_authorization()
+    scenario.original_authority = Authority.original(
+        "orders:read", "admin:delete"
+    )
+
+    removal_step = scenario.delegation_chain[0]
+    first_step = scenario.delegation_chain[1]
+    second_step = scenario.delegation_chain[2]
+
+    # User -> agent removes admin:delete from the known original authority.
+    scenario.delegation_chain[0] = DelegationStep(
+        from_principal=removal_step.from_principal,
+        to_principal=removal_step.to_principal,
+        delegated_authority=Authority.delegated("orders:read"),
+        credential_type=removal_step.credential_type,
+        explicit=True,
+    )
+
+    # Agent -> checkout keeps the permission removed.
+    scenario.delegation_chain[1] = DelegationStep(
+        from_principal=first_step.from_principal,
+        to_principal=first_step.to_principal,
+        delegated_authority=Authority.delegated("orders:read"),
+        credential_type=first_step.credential_type,
+        explicit=True,
+    )
+
+    # Checkout -> payment tries to restore admin:delete.
+    scenario.delegation_chain[2] = DelegationStep(
+        from_principal=second_step.from_principal,
+        to_principal=second_step.to_principal,
+        delegated_authority=Authority.delegated(
+            "orders:read", "payments:charge", "admin:delete"
+        ),
+        credential_type=second_step.credential_type,
+        explicit=True,
+    )
+
+    result = DETECTOR.analyze(scenario)
+
+    assert "admin:delete" in scenario.original_authority.permissions
+    assert all(
+        "admin:delete" not in step.delegated_authority.permissions
+        for step in scenario.delegation_chain[:2]
+    )
+    assert "admin:delete" in (
+        scenario.delegation_chain[2].delegated_authority.permissions
+    )
+    assert result.verdict == Verdict.DETECTED
+    assert result.finding.finding_type == FindingType.UNAUTHORIZED_DELEGATION
+    assert any(
+        item["from_principal"] == second_step.from_principal.principal_id
+        and item["to_principal"] == second_step.to_principal.principal_id
+        and "admin:delete" in item["permissions"]
+        for item in result.details["unauthorized_expansions"]
+    )
+    assert all(
+        "payments:charge" not in item["permissions"]
+        for item in result.details["unauthorized_expansions"]
+        if item["from_principal"] == second_step.from_principal.principal_id
+        and item["to_principal"] == second_step.to_principal.principal_id
+    )
+
+
+def test_unknown_scope_hop_returns_insufficient_evidence():
+    """Unknown delegated scopes must not silently authorize an action."""
+    scenario = legitimate_delegated_authorization()
+    step = scenario.delegation_chain[1]
+
+    scenario.delegation_chain[1] = DelegationStep(
+        from_principal=step.from_principal,
+        to_principal=step.to_principal,
+        delegated_authority=Authority.delegated("orders:read"),
+        credential_type=step.credential_type,
+        explicit=True,
+        scopes_known=False,
+    )
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+    assert "agent-001 -> checkout-svc" in result.reason
+    assert "scope evidence is missing or malformed" in result.reason
+
+
+def test_unknown_scope_does_not_prove_later_permission_was_added():
+    """Unknown prior scopes prevent attributing additions to a later hop."""
+    scenario = legitimate_delegated_authorization()
+    first_step = scenario.delegation_chain[1]
+    second_step = scenario.delegation_chain[2]
+    delegation_policy = DelegationPolicy()
+    delegation_policy.register(
+        first_step.from_principal.principal_id,
+        first_step.to_principal.principal_id,
+        {"payments:charge"},
+    )
+    delegation_policy.register(
+        second_step.from_principal.principal_id,
+        second_step.to_principal.principal_id,
+        {"payments:charge"},
+    )
+    detector = ConfusedDeputyDetector(delegation_policy=delegation_policy)
+
+    scenario.delegation_chain[1] = DelegationStep(
+        from_principal=first_step.from_principal,
+        to_principal=first_step.to_principal,
+        delegated_authority=Authority.delegated("orders:read"),
+        credential_type=first_step.credential_type,
+        explicit=True,
+        scopes_known=False,
+    )
+
+    scenario.delegation_chain[2] = DelegationStep(
+        from_principal=second_step.from_principal,
+        to_principal=second_step.to_principal,
+        delegated_authority=Authority.delegated(
+            "orders:read", "payments:charge", "admin:delete"
+        ),
+        credential_type=second_step.credential_type,
+        explicit=True,
+        scopes_known=True,
+    )
+
+    result = detector.analyze(scenario)
+
+    assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+    assert result.finding.finding_type == FindingType.NONE
+    assert "agent-001 -> checkout-svc" in result.reason
+    assert "admin:delete" not in result.reason
+    assert "unauthorized_expansions" not in result.details
+
+
+def test_legitimate_delegated_permission_is_not_an_expansion():
+    scenario = legitimate_delegated_authorization()
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.NOT_DETECTED
+    assert result.finding.finding_type == FindingType.NONE
+
+
+def test_unknown_scopes_without_independent_violation_are_insufficient():
+    scenario = legitimate_delegated_authorization()
+    step = scenario.delegation_chain[1]
+
+    scenario.delegation_chain[1] = DelegationStep(
+        from_principal=step.from_principal,
+        to_principal=step.to_principal,
+        delegated_authority=Authority.empty(),
+        credential_type=step.credential_type,
+        explicit=True,
+        scopes_known=False,
+    )
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+    assert result.finding.finding_type == FindingType.NONE
+
+
+def test_implicit_delegation_does_not_inherit_permissions():
+    scenario = legitimate_delegated_authorization()
+    last_step = scenario.delegation_chain[-1]
+    scenario.delegation_chain[-1] = DelegationStep(
+        from_principal=last_step.from_principal,
+        to_principal=last_step.to_principal,
+        delegated_authority=last_step.delegated_authority,
+        credential_type=last_step.credential_type,
+        explicit=False,
+    )
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+    assert "delegation is not explicit" in result.reason
+
+
+def test_identical_scenarios_produce_identical_results():
+    scenario = legitimate_delegated_authorization()
+
+    first = DETECTOR.analyze(scenario)
+    second = DETECTOR.analyze(scenario)
+
+    assert first.verdict == second.verdict
+    assert first.reason == second.reason
+    assert first.details == second.details
+    assert first.finding == second.finding
