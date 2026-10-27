@@ -505,6 +505,7 @@ class AuthorizationGraph:
             return (
                 a.step_index == b.step_index
                 and a.credential_type == b.credential_type
+                and a.explicit == b.explicit
                 and a.delegated_authority.permissions == b.delegated_authority.permissions
             )
 

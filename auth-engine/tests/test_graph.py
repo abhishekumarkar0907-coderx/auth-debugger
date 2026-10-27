@@ -206,6 +206,19 @@ class TestGraphStore:
         assert graph.get_predecessors("non-existent") == []
         assert graph.get_neighbors("non-existent") == []
 
+    def test_explicit_and_implicit_delegation_edges_are_not_duplicates(self):
+        graph = AuthorizationGraph()
+        common = dict(
+            source_id="u-conflict",
+            target_id="s-conflict",
+            trace_id="t-conflict",
+            delegated_authority=Authority.delegated("read"),
+        )
+        graph.add_edge(DelegationEdge(**common, explicit=True))
+        graph.add_edge(DelegationEdge(**common, explicit=False))
+
+        assert graph.edge_count == 2
+
     def test_neighbor_directions(self):
         graph = AuthorizationGraph()
         graph.add_edge(GraphEdge(source_id="A", target_id="B"))
