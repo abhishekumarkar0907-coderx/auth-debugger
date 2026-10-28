@@ -924,3 +924,34 @@ def test_graph_json_rejects_unsupported_schema(tmp_path):
 
     with pytest.raises(ValueError, match="schema_version"):
         AuthorizationGraph.load_json(snapshot)
+
+def test_delegation_paths_are_deterministic_when_edge_order_changes():
+    graph = AuthorizationGraph()
+    graph.add_node(PrincipalNode(node_id="order-user"))
+    graph.add_node(ServiceNode(node_id="order-service", service_name="orders"))
+    graph.add_node(OperationNode(node_id="op:order-test", semantic_action="orders:read"))
+    graph.add_edge(DelegationEdge(
+        source_id="order-user", target_id="order-service",
+        trace_id="trace-order", step_index=0,
+    ))
+    graph.add_edge(ExecutionEdge(
+        source_id="order-service", target_id="op:order-test",
+        trace_id="trace-order",
+    ))
+
+    reordered = AuthorizationGraph()
+    for node in reversed(graph.nodes()):
+        reordered.add_node(node)
+    for edge in reversed(graph.edges()):
+        reordered.add_edge(edge)
+
+    kwargs = {
+        "initiating_principal_id": "order-user",
+        "target_action": "orders:read",
+        "trace_id": "trace-order",
+    }
+    first = find_delegation_paths(graph=graph, **kwargs)
+    second = find_delegation_paths(graph=reordered, **kwargs)
+    assert [(p.path_nodes, p.hop_count) for p in first] == [
+        (p.path_nodes, p.hop_count) for p in second
+    ]
