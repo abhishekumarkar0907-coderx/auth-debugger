@@ -955,3 +955,55 @@ def test_delegation_paths_are_deterministic_when_edge_order_changes():
     assert [(p.path_nodes, p.hop_count) for p in first] == [
         (p.path_nodes, p.hop_count) for p in second
     ]
+
+def test_implicit_delegation_edge_does_not_grant_its_recorded_authority():
+    graph = AuthorizationGraph()
+    graph.add_node(
+        PrincipalNode(
+            node_id="implicit-user",
+            original_authority=Authority.original("orders:read"),
+        )
+    )
+    graph.add_node(
+        ServiceNode(
+            node_id="implicit-service",
+            service_name="implicit-service",
+            service_authority=Authority.service("payments:admin"),
+        )
+    )
+    graph.add_node(
+        OperationNode(
+            node_id="op:payments:admin",
+            service_name="implicit-service",
+            semantic_action="payments:admin",
+            required_authority=frozenset({"payments:admin"}),
+        )
+    )
+    graph.add_edge(
+        DelegationEdge(
+            source_id="implicit-user",
+            target_id="implicit-service",
+            trace_id="implicit-trace",
+            delegated_authority=Authority.delegated("payments:admin"),
+            explicit=False,
+            step_index=0,
+        )
+    )
+    graph.add_edge(
+        ExecutionEdge(
+            source_id="implicit-service",
+            target_id="op:payments:admin",
+            trace_id="implicit-trace",
+        )
+    )
+
+    paths = find_delegation_paths(
+        graph=graph,
+        initiating_principal_id="implicit-user",
+        target_action="payments:admin",
+        trace_id="implicit-trace",
+    )
+
+    assert len(paths) == 1
+    assert paths[0].cumulative_authority.permissions == frozenset({"orders:read"})
+    assert "payments:admin" not in paths[0].cumulative_authority.permissions
