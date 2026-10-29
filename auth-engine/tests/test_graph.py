@@ -195,7 +195,31 @@ class TestGraphStore:
         assert graph.edge_count == 1
         assert len(graph.get_outgoing_edges("u1")) == 1
         assert len(graph.get_incoming_edges("s1")) == 1
+    def test_conflicting_delegation_metadata_is_not_silently_ignored(self):
+        graph = AuthorizationGraph()
+        common = dict(
+            source_id="u-meta",
+            target_id="s-meta",
+            trace_id="t-meta",
+            step_index=0,
+            delegated_authority=Authority.delegated("read"),
+        )
 
+        first = DelegationEdge(
+            **common,
+            metadata={"evidence": "observed"},
+        )
+        conflicting = DelegationEdge(
+            **common,
+            metadata={"evidence": "configured"},
+        )
+
+        graph.add_edge(first)
+        graph.add_edge(conflicting)
+
+        assert graph.edge_count == 2
+        assert graph.edges()[0].metadata["evidence"] == "observed"
+        assert graph.edges()[1].metadata["evidence"] == "configured"
     def test_nonexistent_node_queries_safe(self):
         graph = AuthorizationGraph()
         assert graph.get_node("non-existent") is None
