@@ -1206,6 +1206,117 @@
   animation: spin 0.8s linear infinite;
 }
 
+.security-analysis-panel {
+  display: grid;
+  gap: 12px;
+  padding: 17px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.security-analysis-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.security-analysis-eyebrow {
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.security-analysis-heading h3 {
+  margin: 3px 0 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.security-verdict {
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.security-verdict-detected {
+  border-color: #e6b7ad;
+  background: #fbefec;
+  color: #a33e35;
+}
+
+.security-verdict-insufficient_evidence,
+.security-verdict-unavailable {
+  border-color: #e6d4ad;
+  background: #faf5e8;
+  color: #896820;
+}
+
+.security-verdict-not_detected {
+  border-color: #c7ddcf;
+  background: #edf5ef;
+  color: #356b4b;
+}
+
+.security-finding-type,
+.security-analysis-reason,
+.security-analysis-unavailable {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.security-finding-type strong { color: var(--text-primary); }
+
+.security-evidence-warnings {
+  padding: 12px;
+  border: 1px solid #e6d4ad;
+  border-radius: 9px;
+  background: #faf5e8;
+  color: #6f5926;
+  font-size: 11px;
+}
+
+.security-evidence-warnings h4 {
+  margin: 0 0 7px;
+  font-size: 11px;
+}
+
+.security-evidence-warnings ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.security-evidence-warnings li strong { margin-right: 5px; }
+.security-evidence-warnings p { margin: 8px 0 0; font-weight: 600; }
+
+.security-analysis-details summary {
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.security-analysis-details pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* A warmer, quieter visual system for long investigation sessions. */
 .trace-explorer-root {
   background: var(--bg-primary);
@@ -1903,6 +2014,12 @@ body[data-theme='dark'] {
 .trace-explorer-root[data-theme='dark'] .workspace-state-container .state-detail { color: #a8b6bd; }
 .trace-explorer-root[data-theme='dark'] .workspace-state-container .state-title { color: #edf3f5; }
 .trace-explorer-root[data-theme='dark'] .workspace-state-container .state-icon.error-icon { background: #463533; color: #e19c8f; }
+.trace-explorer-root[data-theme='dark'] .security-analysis-panel { border-bottom-color: #354650; }
+.trace-explorer-root[data-theme='dark'] .security-verdict-detected { border-color: #754d48; background: #432f30; color: #efb3a9; }
+.trace-explorer-root[data-theme='dark'] .security-verdict-insufficient_evidence,
+.trace-explorer-root[data-theme='dark'] .security-verdict-unavailable { border-color: #66583a; background: #383426; color: #e4ce91; }
+.trace-explorer-root[data-theme='dark'] .security-verdict-not_detected { border-color: #3e624d; background: #263b30; color: #acd0b6; }
+.trace-explorer-root[data-theme='dark'] .security-evidence-warnings { border-color: #66583a; background: #383426; color: #e4ce91; }
 .trace-explorer-root[data-theme='dark'] .btn-primary { background: #688ba0; color: #101a20; }
 .trace-explorer-root[data-theme='dark'] .btn-primary:hover { background: #7ea0b2; }
 .trace-explorer-root[data-theme='dark'] .url-modal-dialog { border-color: #40515d; background: #202c36; }

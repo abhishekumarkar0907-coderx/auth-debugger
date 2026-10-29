@@ -27,6 +27,37 @@ export interface SpanRecord {
   attributes: Record<string, unknown>;
 }
 
+export interface SecurityEvidenceWarning {
+  field: string;
+  warning_type: string;
+  message: string;
+  sources?: string[];
+}
+
+export interface SecurityFinding {
+  finding_type?: string;
+  reason?: string;
+  effective_action?: string | null;
+  attack_path?: string[];
+  [key: string]: unknown;
+}
+
+export interface SecurityAnalysis {
+  verdict: string;
+  reason?: string;
+  finding?: SecurityFinding | null;
+  details?: Record<string, unknown> | null;
+  context?: {
+    warnings?: SecurityEvidenceWarning[];
+    [key: string]: unknown;
+  };
+}
+
+export interface TraceGraphResponse {
+  security_analysis?: SecurityAnalysis | null;
+  [key: string]: unknown;
+}
+
 /**
  * OpenTelemetry SpanKind standard numerical codes:
  * 0 = SPAN_KIND_UNSPECIFIED
