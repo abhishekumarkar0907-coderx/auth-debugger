@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
+import os
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from .otlp import normalize_traces
+from .otlp import InvalidOTLPTracePayload, normalize_traces
 from .schemas import IngestResponse, SpanRecord, TraceSummary
+from .security_engine import analyze_security_trace
 from .store import InMemorySpanStore
 from auth_engine.graph.adapter import build_graph_from_spans
 from auth_engine.graph import find_authority_amplification_hops
@@ -20,6 +23,9 @@ app = FastAPI(
 )
 
 store = InMemorySpanStore(max_spans=5000)
+analysis_results: dict[str, dict] = {}
+SERVICE_AUTHORITY_CONFIG: dict[str, list[str]] = {}
+logger = logging.getLogger(__name__)
 
 
 @app.get("/health")
@@ -51,6 +57,68 @@ async def get_trace(trace_id: str) -> list[SpanRecord]:
     return spans
 
 
+@app.post("/api/v1/demo/unauthorized-delegation")
+async def load_unauthorized_delegation_demo() -> dict[str, object]:
+    if (
+        os.getenv("AUTH_DEBUGGER_ENV", "").lower() != "development"
+        or os.getenv("AUTH_DEBUGGER_ENABLE_DEMO_TRACE", "").lower() != "true"
+    ):
+        raise HTTPException(status_code=404, detail="Demo trace is disabled")
+
+    trace_id = "demo-unauthorized-delegation-v1"
+    store.add(
+        SpanRecord(
+            trace_id=trace_id,
+            span_id="demo-checkout",
+            parent_span_id=None,
+            service_name="checkout",
+            span_name="POST /checkout",
+            start_time_unix_nano=1_000_000_000,
+            end_time_unix_nano=1_025_000_000,
+            duration_ms=25.0,
+            span_kind=1,
+            status_code=1,
+            attributes={
+                "authz.principal.id": "demo-user",
+                "authz.principal.type": "user",
+                "authz.principal.scopes": "orders:read",
+                "authz.delegation.from": "demo-user",
+                "authz.delegation.to": "checkout-svc",
+                "authz.delegation.scopes": "orders:read",
+                "authz.credential.type": "user_token",
+            },
+        )
+    )
+    store.add(
+        SpanRecord(
+            trace_id=trace_id,
+            span_id="demo-payment",
+            parent_span_id="demo-checkout",
+            service_name="payment",
+            span_name="oteldemo.PaymentService/Charge",
+            start_time_unix_nano=1_025_000_000,
+            end_time_unix_nano=1_050_000_000,
+            duration_ms=25.0,
+            span_kind=1,
+            status_code=1,
+            attributes={
+                "authz.principal.id": "demo-user",
+                "authz.principal.type": "user",
+                "authz.principal.scopes": "orders:read",
+                "authz.delegation.from": "checkout-svc",
+                "authz.delegation.to": "payment-svc",
+                "authz.delegation.scopes": "orders:read,payments:charge",
+                "authz.credential.type": "service_credential",
+            },
+        )
+    )
+    return {
+        "trace_id": trace_id,
+        "spans": 2,
+        "graph_url": f"/api/v1/traces/{trace_id}/graph",
+    }
+
+
 @app.get("/api/v1/traces/{trace_id}/graph")
 async def get_trace_graph(trace_id: str) -> dict[str, object]:
     """Build a graph using only spans observed for this trace."""
@@ -79,13 +147,76 @@ async def get_trace_graph(trace_id: str) -> dict[str, object]:
 
     graph = build_graph_from_spans(spans)
     hops = find_authority_amplification_hops(graph, trace_id=trace_id)
+    try:
+        security_analysis = analyze_security_trace(
+            spans,
+            service_authority_config=SERVICE_AUTHORITY_CONFIG,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Analysis could not be completed.",
+        ) from exc
+
+    analysis_results[trace_id] = security_analysis
 
     return {
         "trace_id": trace_id,
         "nodes": json_safe(graph.nodes()),
         "edges": json_safe(graph.edges()),
         "authority_amplification_hops": json_safe(hops),
+        "security_analysis": json_safe(security_analysis),
     }
+
+
+@app.post("/api/v1/analysis/{trace_id}")
+async def post_analysis(trace_id: str) -> dict:
+    spans = store.trace(trace_id)
+    if not spans:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    try:
+        result = analyze_security_trace(
+            spans,
+            service_authority_config=SERVICE_AUTHORITY_CONFIG,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Analysis could not be completed.",
+        ) from exc
+
+    analysis_results[trace_id] = result
+    return result
+
+
+@app.get("/api/v1/analysis/{trace_id}")
+async def get_analysis(trace_id: str) -> dict:
+    spans = store.trace(trace_id)
+    if not spans:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    result = analysis_results.get(trace_id)
+    if result is None:
+        try:
+            result = analyze_security_trace(
+                spans,
+                service_authority_config=SERVICE_AUTHORITY_CONFIG,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="Analysis could not be completed.",
+            ) from exc
+        analysis_results[trace_id] = result
+
+    return result
 
 
 @app.post(
@@ -114,10 +245,16 @@ async def ingest_traces(
 
     try:
         resource_span_count, records = normalize_traces(body)
-    except Exception as exc:
+    except InvalidOTLPTracePayload as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid OTLP trace payload: {exc}",
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected failure while normalizing OTLP traces")
+        raise HTTPException(
+            status_code=500,
+            detail="Trace ingestion could not be completed.",
         ) from exc
 
     for record in records:

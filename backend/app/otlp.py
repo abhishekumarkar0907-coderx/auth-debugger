@@ -5,8 +5,13 @@ from typing import Any
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceRequest,
 )
+from google.protobuf.message import DecodeError
 
 from .schemas import SpanRecord
+
+
+class InvalidOTLPTracePayload(ValueError):
+    """Raised when the request body is not a valid OTLP trace protobuf."""
 
 
 def _hex_bytes(value: bytes) -> str:
@@ -53,7 +58,12 @@ def _service_name(resource_attributes: dict[str, Any]) -> str | None:
 
 def normalize_traces(payload: bytes) -> tuple[int, list[SpanRecord]]:
     request = ExportTraceServiceRequest()
-    request.ParseFromString(payload)
+    try:
+        request.ParseFromString(payload)
+    except DecodeError as exc:
+        raise InvalidOTLPTracePayload(
+            "Invalid OTLP trace payload."
+        ) from exc
 
     records: list[SpanRecord] = []
 
@@ -67,6 +77,25 @@ def normalize_traces(payload: bytes) -> tuple[int, list[SpanRecord]]:
             for span in scope_spans.spans:
                 start_ns = int(span.start_time_unix_nano)
                 end_ns = int(span.end_time_unix_nano)
+                if len(span.trace_id) != 16 or not any(span.trace_id):
+                    raise InvalidOTLPTracePayload(
+                        "Invalid OTLP trace payload."
+                    )
+                if len(span.span_id) != 8 or not any(span.span_id):
+                    raise InvalidOTLPTracePayload(
+                        "Invalid OTLP trace payload."
+                    )
+                if span.parent_span_id and (
+                    len(span.parent_span_id) != 8
+                    or not any(span.parent_span_id)
+                ):
+                    raise InvalidOTLPTracePayload(
+                        "Invalid OTLP trace payload."
+                    )
+                if end_ns < start_ns:
+                    raise InvalidOTLPTracePayload(
+                        "Invalid OTLP trace payload."
+                    )
 
                 records.append(
                     SpanRecord(
