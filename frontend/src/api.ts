@@ -7,7 +7,7 @@
  * - GET  /api/v1/spans?limit=...
  */
 
-import type { SpanRecord, TraceSummary } from './types.ts';
+import type { SpanRecord, TraceGraphResponse, TraceSummary } from './types.ts';
 
 /**
  * Default API base URL for local development:
@@ -147,6 +147,22 @@ export async function fetchTraceSpans(traceId: string, baseUrl?: string): Promis
     throw new Error('trace_id is required');
   }
   return request<SpanRecord[]>(`/api/v1/traces/${encodeURIComponent(traceId)}`, baseUrl);
+}
+
+/**
+ * Get graph analysis for a trace: GET /api/v1/traces/{trace_id}/graph
+ */
+export async function fetchTraceGraph(
+  traceId: string,
+  baseUrl?: string
+): Promise<TraceGraphResponse> {
+  if (!traceId) {
+    throw new Error('trace_id is required');
+  }
+  return request<TraceGraphResponse>(
+    `/api/v1/traces/${encodeURIComponent(traceId)}/graph`,
+    baseUrl
+  );
 }
 
 /**

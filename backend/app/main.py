@@ -6,6 +6,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 from .otlp import normalize_traces
 from .schemas import IngestResponse, SpanRecord, TraceSummary
+from .security_engine import analyze_security_spans
 from .store import InMemorySpanStore
 from auth_engine.graph.adapter import build_graph_from_spans
 from auth_engine.graph import find_authority_amplification_hops
@@ -51,6 +52,15 @@ async def get_trace(trace_id: str) -> list[SpanRecord]:
     return spans
 
 
+@app.get("/api/v1/analysis/{trace_id}")
+async def get_trace_analysis(trace_id: str) -> dict[str, object]:
+    """Analyze the stored spans for a trace using the Security Engine."""
+    spans = store.trace(trace_id)
+    if not spans:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return analyze_security_spans(spans)
+
+
 @app.get("/api/v1/traces/{trace_id}/graph")
 async def get_trace_graph(trace_id: str) -> dict[str, object]:
     """Build a graph using only spans observed for this trace."""
@@ -79,12 +89,14 @@ async def get_trace_graph(trace_id: str) -> dict[str, object]:
 
     graph = build_graph_from_spans(spans)
     hops = find_authority_amplification_hops(graph, trace_id=trace_id)
+    security_analysis = analyze_security_spans(spans)
 
     return {
         "trace_id": trace_id,
         "nodes": json_safe(graph.nodes()),
         "edges": json_safe(graph.edges()),
         "authority_amplification_hops": json_safe(hops),
+        "security_analysis": security_analysis,
     }
 
 
