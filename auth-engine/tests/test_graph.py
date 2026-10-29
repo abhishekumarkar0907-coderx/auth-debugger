@@ -195,7 +195,31 @@ class TestGraphStore:
         assert graph.edge_count == 1
         assert len(graph.get_outgoing_edges("u1")) == 1
         assert len(graph.get_incoming_edges("s1")) == 1
+    def test_conflicting_delegation_metadata_is_not_silently_ignored(self):
+        graph = AuthorizationGraph()
+        common = dict(
+            source_id="u-meta",
+            target_id="s-meta",
+            trace_id="t-meta",
+            step_index=0,
+            delegated_authority=Authority.delegated("read"),
+        )
 
+        first = DelegationEdge(
+            **common,
+            metadata={"evidence": "observed"},
+        )
+        conflicting = DelegationEdge(
+            **common,
+            metadata={"evidence": "configured"},
+        )
+
+        graph.add_edge(first)
+        graph.add_edge(conflicting)
+
+        assert graph.edge_count == 2
+        assert graph.edges()[0].metadata["evidence"] == "observed"
+        assert graph.edges()[1].metadata["evidence"] == "configured"
     def test_nonexistent_node_queries_safe(self):
         graph = AuthorizationGraph()
         assert graph.get_node("non-existent") is None
@@ -924,3 +948,86 @@ def test_graph_json_rejects_unsupported_schema(tmp_path):
 
     with pytest.raises(ValueError, match="schema_version"):
         AuthorizationGraph.load_json(snapshot)
+
+def test_delegation_paths_are_deterministic_when_edge_order_changes():
+    graph = AuthorizationGraph()
+    graph.add_node(PrincipalNode(node_id="order-user"))
+    graph.add_node(ServiceNode(node_id="order-service", service_name="orders"))
+    graph.add_node(OperationNode(node_id="op:order-test", semantic_action="orders:read"))
+    graph.add_edge(DelegationEdge(
+        source_id="order-user", target_id="order-service",
+        trace_id="trace-order", step_index=0,
+    ))
+    graph.add_edge(ExecutionEdge(
+        source_id="order-service", target_id="op:order-test",
+        trace_id="trace-order",
+    ))
+
+    reordered = AuthorizationGraph()
+    for node in reversed(graph.nodes()):
+        reordered.add_node(node)
+    for edge in reversed(graph.edges()):
+        reordered.add_edge(edge)
+
+    kwargs = {
+        "initiating_principal_id": "order-user",
+        "target_action": "orders:read",
+        "trace_id": "trace-order",
+    }
+    first = find_delegation_paths(graph=graph, **kwargs)
+    second = find_delegation_paths(graph=reordered, **kwargs)
+    assert [(p.path_nodes, p.hop_count) for p in first] == [
+        (p.path_nodes, p.hop_count) for p in second
+    ]
+
+def test_implicit_delegation_edge_does_not_grant_its_recorded_authority():
+    graph = AuthorizationGraph()
+    graph.add_node(
+        PrincipalNode(
+            node_id="implicit-user",
+            original_authority=Authority.original("orders:read"),
+        )
+    )
+    graph.add_node(
+        ServiceNode(
+            node_id="implicit-service",
+            service_name="implicit-service",
+            service_authority=Authority.service("payments:admin"),
+        )
+    )
+    graph.add_node(
+        OperationNode(
+            node_id="op:payments:admin",
+            service_name="implicit-service",
+            semantic_action="payments:admin",
+            required_authority=frozenset({"payments:admin"}),
+        )
+    )
+    graph.add_edge(
+        DelegationEdge(
+            source_id="implicit-user",
+            target_id="implicit-service",
+            trace_id="implicit-trace",
+            delegated_authority=Authority.delegated("payments:admin"),
+            explicit=False,
+            step_index=0,
+        )
+    )
+    graph.add_edge(
+        ExecutionEdge(
+            source_id="implicit-service",
+            target_id="op:payments:admin",
+            trace_id="implicit-trace",
+        )
+    )
+
+    paths = find_delegation_paths(
+        graph=graph,
+        initiating_principal_id="implicit-user",
+        target_action="payments:admin",
+        trace_id="implicit-trace",
+    )
+
+    assert len(paths) == 1
+    assert paths[0].cumulative_authority.permissions == frozenset({"orders:read"})
+    assert "payments:admin" not in paths[0].cumulative_authority.permissions

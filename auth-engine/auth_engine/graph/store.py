@@ -498,6 +498,7 @@ class AuthorizationGraph:
             or a.target_id != b.target_id
             or a.edge_type != b.edge_type
             or a.trace_id != b.trace_id
+            or a.metadata != b.metadata
         ):
             return False
 
