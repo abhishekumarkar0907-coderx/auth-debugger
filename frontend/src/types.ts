@@ -100,3 +100,5 @@ export interface TraceMetrics {
   earliestStartNs: number;
   latestEndNs: number;
 }
+
+export * from './types/securityAnalysis.ts';

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import type { SpanRecord, TraceSummary } from '../types.ts';
+import type { AnalysisPanelState, SpanRecord, TraceSummary } from '../types.ts';
+import type { AiExplanationLoader } from '../services/aiExplanation.ts';
 import { getInitialApiBaseUrl } from '../api.ts';
 import { createInvestigationApi, type InvestigationDataSource } from '../services/investigationApi.ts';
 import { computeTraceMetrics, formatDuration } from '../utils/spanHelpers.ts';
@@ -8,6 +9,7 @@ import { TraceList } from './TraceList.tsx';
 import { SpanTree } from './SpanTree.tsx';
 import { SpanDetail } from './SpanDetail.tsx';
 import { SecurityAnalysisPanel } from './SecurityAnalysisPanel.tsx';
+import { AiExplanationPanel } from './AiExplanationPanel.tsx';
 import { CaseInvestigation } from './CaseInvestigation.tsx';
 
 export const TraceExplorer: React.FC = () => {
@@ -45,6 +47,9 @@ export const TraceExplorer: React.FC = () => {
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   const [detailPanel, setDetailPanel] = useState<'span' | 'security'>('span');
 
+  // Security analysis state
+  const [analysisState, setAnalysisState] = useState<AnalysisPanelState>({ kind: 'loading' });
+
   // View mode: trace explorer, recent activity, or the guided case walkthrough.
   const [viewMode, setViewMode] = useState<'by-trace' | 'recent-spans' | 'case-demo'>('by-trace');
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -63,6 +68,75 @@ export const TraceExplorer: React.FC = () => {
       // The selected theme still works for this session when storage is unavailable.
     }
   }, [theme]);
+
+  // Request deterministic security analysis when selected trace changes
+  useEffect(() => {
+    if (!selectedTraceId) {
+      setAnalysisState({ kind: 'empty', message: 'Select a trace to review its security analysis.' });
+      return;
+    }
+    let cancelled = false;
+    setAnalysisState({ kind: 'loading' });
+    apiClient
+      .analysis(selectedTraceId)
+      .then((res) => {
+        if (cancelled) return;
+        if (!res || !res.security_analysis) {
+          setAnalysisState({ kind: 'empty' });
+        } else {
+          setAnalysisState({ kind: 'ready', analysis: res.security_analysis });
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setAnalysisState({
+          kind: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiClient, selectedTraceId]);
+
+  const loadExplanation: AiExplanationLoader = useCallback(async (findingId: string) => {
+    if (dataSource === 'demo') {
+      return {
+        status: 'ready' as const,
+        finding_id: findingId,
+        explanation: {
+          summary: {
+            text: 'A delegated service token was swapped across service boundaries without sufficient permissions for the requested ledger export action.',
+            evidence_refs: ['source_span_id', 'resource'],
+          },
+          why_detected: {
+            text: 'The effective operation requires finance:export authority, but the delegated request credential only carried reports:read.',
+            evidence_refs: ['reason'],
+          },
+          authority_difference: {
+            text: 'Missing required authority: finance:export. The acting service held reports:read.',
+            evidence_refs: ['resource'],
+          },
+          request_path_explanation: {
+            text: 'The request initiated from Maya Chen, routed through the finance portal to the reporting worker, where the token swap took place.',
+            evidence_refs: ['source_span_id'],
+          },
+          limitations: ['Network-level egress controls were not inspected.'],
+          remediation: [
+            {
+              text: 'Ensure the token exchange preserves original user authority constraints or rejects operations exceeding delegated scopes.',
+              evidence_refs: ['reason'],
+            },
+          ],
+        },
+      };
+    }
+    return {
+      status: 'unavailable' as const,
+      finding_id: findingId,
+      message: 'AI explanations are currently unavailable.',
+    };
+  }, [dataSource]);
 
   // Check backend health
   const checkHealth = useCallback(async (url: string) => {
@@ -552,7 +626,19 @@ export const TraceExplorer: React.FC = () => {
                   {detailPanel === 'span' ? (
                     <SpanDetail span={selectedSpan} onClose={() => setSelectedSpanId(null)} />
                   ) : (
-                    <SecurityAnalysisPanel traceId={analysisTraceId} spans={analysisSpans} />
+                    <>
+                      <SecurityAnalysisPanel
+                        traceId={analysisTraceId}
+                        spans={analysisSpans}
+                        analysisState={analysisState}
+                      />
+                      {analysisState.kind === 'ready' && (
+                        <AiExplanationPanel
+                          findingId={analysisState.analysis.finding.finding_id}
+                          loadExplanation={loadExplanation}
+                        />
+                      )}
+                    </>
                   )}
                 </div>
               </div>

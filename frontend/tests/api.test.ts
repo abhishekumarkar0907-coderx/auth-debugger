@@ -10,6 +10,7 @@ import {
   fetchTraces,
   fetchTraceSpans,
   fetchRecentSpans,
+  fetchTraceAnalysis,
 } from '../src/api.ts';
 
 test('DEFAULT_API_BASE_URL defaults to empty string for same-origin relative requests', () => {
@@ -41,6 +42,17 @@ test('fetchTraceSpans validates traceId requirement', async () => {
   await assert.rejects(
     async () => {
       await fetchTraceSpans('');
+    },
+    {
+      message: 'trace_id is required',
+    }
+  );
+});
+
+test('fetchTraceAnalysis validates traceId requirement', async () => {
+  await assert.rejects(
+    async () => {
+      await fetchTraceAnalysis('');
     },
     {
       message: 'trace_id is required',
@@ -91,6 +103,18 @@ test('fetch functions use same-origin relative paths by default for Vite proxyin
       if (url === '/api/v1/spans?limit=50') {
         return new Response(JSON.stringify([]), { status: 200 });
       }
+      if (url === '/api/v1/traces/001122/analysis') {
+        return new Response(
+          JSON.stringify({
+            trace_id: '001122',
+            nodes: [],
+            edges: [],
+            authority_amplification_hops: [],
+            security_analysis: null,
+          }),
+          { status: 200 }
+        );
+      }
 
       return new Response(JSON.stringify({ detail: 'Not Found' }), { status: 404 });
     };
@@ -116,6 +140,11 @@ test('fetch functions use same-origin relative paths by default for Vite proxyin
     const recent = await fetchRecentSpans(50);
     assert.deepEqual(recent, []);
     assert.equal(calls[3].url, '/api/v1/spans?limit=50');
+
+    // Test trace analysis - default relative path
+    const analysis = await fetchTraceAnalysis('001122');
+    assert.equal(analysis.trace_id, '001122');
+    assert.equal(calls[4].url, '/api/v1/traces/001122/analysis');
   } finally {
     globalThis.fetch = originalFetch;
   }

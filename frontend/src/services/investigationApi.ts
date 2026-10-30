@@ -1,6 +1,6 @@
-import { fetchHealth, fetchRecentSpans, fetchTraceSpans, fetchTraces } from '../api.ts';
-import { DEMO_RECENT_SPANS, DEMO_TRACES, demoSpansForTrace } from '../mocks/demoData.ts';
-import type { SpanRecord, TraceSummary } from '../types.ts';
+import { fetchHealth, fetchRecentSpans, fetchTraceAnalysis, fetchTraceSpans, fetchTraces } from '../api.ts';
+import { DEMO_RECENT_SPANS, DEMO_TRACES, demoAnalysisForTrace, demoSpansForTrace } from '../mocks/demoData.ts';
+import type { SpanRecord, TraceAnalysisEnvelope, TraceSummary } from '../types.ts';
 
 export type InvestigationDataSource = 'demo' | 'live';
 
@@ -23,6 +23,11 @@ export function createInvestigationApi(source: InvestigationDataSource, baseUrl:
       return source === 'demo'
         ? Promise.resolve(DEMO_RECENT_SPANS.slice(0, limit))
         : fetchRecentSpans(limit, baseUrl);
+    },
+    analysis(traceId: string): Promise<TraceAnalysisEnvelope | null> {
+      return source === 'demo'
+        ? Promise.resolve(demoAnalysisForTrace(traceId))
+        : fetchTraceAnalysis(traceId, baseUrl);
     },
   };
 }

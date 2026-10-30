@@ -1,10 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import type { SpanRecord } from '../types.ts';
+import type { AnalysisPanelState, SpanRecord } from '../types.ts';
 import { analyzeTraceMetadata } from '../utils/securityAnalysis.ts';
 
 interface SecurityAnalysisPanelProps {
   traceId: string | null;
   spans: SpanRecord[];
+  analysisState?: AnalysisPanelState;
 }
 
 const VERDICT_LABELS = {
@@ -25,9 +26,87 @@ const VALUE_ROWS = [
   ['Claims / scopes', 'claims'],
 ] as const;
 
-export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ traceId, spans }) => {
+export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ traceId, spans, analysisState }) => {
   const [showAllEvidence, setShowAllEvidence] = useState(false);
-  const analysis = useMemo(() => analyzeTraceMetadata(spans), [spans]);
+
+  if (analysisState?.kind === 'loading') {
+    return (
+      <section className="security-analysis" role="status" aria-label="Security analysis">
+        <header className="security-analysis-header">
+          <div>
+            <p className="security-eyebrow">AUTHORIZATION REVIEW</p>
+            <h3 id="security-analysis-title">Security analysis</h3>
+            <p className="security-trace-id" title={traceId || undefined}>{traceId || 'Select a trace'}</p>
+          </div>
+        </header>
+        <p>Loading deterministic analysis…</p>
+      </section>
+    );
+  }
+
+  if (analysisState?.kind === 'empty') {
+    return (
+      <section className="security-analysis" aria-label="Security analysis">
+        <header className="security-analysis-header">
+          <div>
+            <p className="security-eyebrow">AUTHORIZATION REVIEW</p>
+            <h3 id="security-analysis-title">Security analysis</h3>
+            <p className="security-trace-id" title={traceId || undefined}>{traceId || 'Select a trace'}</p>
+          </div>
+        </header>
+        <p>{analysisState.message || 'No deterministic analysis is available for this trace. This does not mean the trace is safe.'}</p>
+      </section>
+    );
+  }
+
+  if (analysisState?.kind === 'error') {
+    return (
+      <section className="security-analysis" role="alert" aria-label="Security analysis error">
+        <header className="security-analysis-header">
+          <div>
+            <p className="security-eyebrow">AUTHORIZATION REVIEW</p>
+            <h3 id="security-analysis-title">Security analysis unavailable</h3>
+            <p className="security-trace-id" title={traceId || undefined}>{traceId || 'Select a trace'}</p>
+          </div>
+        </header>
+        <p>{analysisState.message}</p>
+      </section>
+    );
+  }
+
+  const ready = analysisState?.kind === 'ready' ? analysisState.analysis : null;
+  const isConflicted = Boolean(ready && ready.verdict !== ready.finding.verdict);
+
+  const analysis = useMemo(() => {
+    if (ready) {
+      const f = ready.finding;
+      const principal = f.initiating_principal
+        ? `${f.initiating_principal.principal_type}:${f.initiating_principal.principal_id}${f.initiating_principal.service_name ? `@${f.initiating_principal.service_name}` : ''}`
+        : null;
+      return {
+        verdict: ready.verdict,
+        hasDetectorVerdict: true,
+        reason: ready.reason || f.reason,
+        findingId: f.finding_id,
+        severity: f.severity,
+        principal,
+        actor: null,
+        service: f.initiating_principal?.service_name || null,
+        action: f.effective_action,
+        resource: null,
+        outcome: null,
+        delegation: null,
+        credentialTransition: null,
+        claims: null,
+        requiredAuthority: f.required_authority || [],
+        requestAuthority: f.delegated_authority?.permissions || [],
+        serviceAuthority: f.service_authority?.permissions || [],
+        attackPath: f.attack_path || [],
+        evidence: Object.entries(f.evidence || {}).map(([key, value]) => ({ key, value })),
+      };
+    }
+    return analyzeTraceMetadata(spans);
+  }, [ready, spans]);
 
   return (
     <section className="security-analysis" aria-labelledby="security-analysis-title">
@@ -45,11 +124,15 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ tr
 
       <div className={`analysis-summary ${analysis.verdict.toLowerCase().replaceAll('_', '-')}`}>
         <strong>{VERDICT_LABELS[analysis.verdict]}</strong>
-        <p>
-          {analysis.reason || (analysis.hasDetectorVerdict
-            ? 'This verdict was supplied by the authorization detector.'
-            : 'No detector result is attached to these spans yet. The interface will not infer a vulnerability from trace data alone.')}
-        </p>
+        {isConflicted ? (
+          <p role="alert">The response contains conflicting deterministic verdicts. Review the backend result.</p>
+        ) : (
+          <p>
+            {analysis.reason || (analysis.hasDetectorVerdict
+              ? 'This verdict was supplied by the authorization detector.'
+              : 'No detector result is attached to these spans yet. The interface will not infer a vulnerability from trace data alone.')}
+          </p>
+        )}
       </div>
 
       <div className="analysis-section">

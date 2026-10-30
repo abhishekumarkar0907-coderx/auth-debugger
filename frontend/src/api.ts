@@ -7,7 +7,7 @@
  * - GET  /api/v1/spans?limit=...
  */
 
-import type { SpanRecord, TraceSummary } from './types.ts';
+import type { SpanRecord, TraceSummary, TraceAnalysisEnvelope } from './types.ts';
 
 /**
  * Default API base URL for local development:
@@ -154,4 +154,14 @@ export async function fetchTraceSpans(traceId: string, baseUrl?: string): Promis
  */
 export async function fetchRecentSpans(limit: number = 100, baseUrl?: string): Promise<SpanRecord[]> {
   return request<SpanRecord[]>(`/api/v1/spans?limit=${encodeURIComponent(limit)}`, baseUrl);
+}
+
+/**
+ * Get deterministic security analysis for a specific trace: GET /api/v1/traces/{trace_id}/analysis
+ */
+export async function fetchTraceAnalysis(traceId: string, baseUrl?: string): Promise<TraceAnalysisEnvelope> {
+  if (!traceId) {
+    throw new Error('trace_id is required');
+  }
+  return request<TraceAnalysisEnvelope>(`/api/v1/traces/${encodeURIComponent(traceId)}/analysis`, baseUrl);
 }

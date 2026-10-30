@@ -1,4 +1,4 @@
-import type { SpanRecord, TraceSummary } from '../types.ts';
+import type { SpanRecord, TraceSummary, TraceAnalysisEnvelope } from '../types.ts';
 
 /** Case walkthrough data is intentionally separate from the backend span schema. */
 export type CaseNodeKind = 'person' | 'service' | 'credential' | 'resource' | 'external';
@@ -202,4 +202,98 @@ export const DEMO_RECENT_SPANS: SpanRecord[] = [...DEMO_SPANS.flat()].sort(
 export function demoSpansForTrace(traceId: string): SpanRecord[] {
   const index = DEMO_TRACES.findIndex((trace) => trace.trace_id === traceId);
   return index < 0 ? [] : DEMO_SPANS[index];
+}
+
+export function demoAnalysisForTrace(traceId: string): TraceAnalysisEnvelope | null {
+  if (traceId === traceIds[0]) {
+    return {
+      trace_id: traceId,
+      nodes: [],
+      edges: [],
+      authority_amplification_hops: [],
+      security_analysis: {
+        verdict: 'DETECTED',
+        finding: {
+          finding_id: 'AUTHZ-8821',
+          verdict: 'DETECTED',
+          trace_id: traceId,
+          initiating_principal: {
+            principal_id: 'maya.chen@northstar.example',
+            principal_type: 'user',
+            service_name: null,
+          },
+          delegated_authority: {
+            permissions: ['reports:read'],
+            source: 'delegated',
+          },
+          effective_action: 'ledger.export.read',
+          required_authority: ['finance:export'],
+          service_authority: {
+            permissions: ['reports:read'],
+            source: 'service',
+          },
+          attack_path: [
+            'Maya Chen',
+            'Finance portal',
+            'reporting-worker',
+            'svc-reporting token',
+            'Quarterly ledger',
+          ],
+          evidence: {
+            source_span_id: '0100000000000001',
+            resource: 'finance://quarterly-ledger',
+            reason: 'The delegated service credential did not include the authority required by the finance ledger.',
+          },
+          reason: 'The delegated service credential did not include the authority required by the finance ledger.',
+          severity: 'HIGH',
+        },
+        reason: 'The delegated service credential did not include the authority required by the finance ledger.',
+        details: {
+          required_action: ['finance:export'],
+          request_authority: ['reports:read'],
+          service_authority: ['reports:read'],
+        },
+      },
+    };
+  }
+  if (traceId === traceIds[1]) {
+    return {
+      trace_id: traceId,
+      nodes: [],
+      edges: [],
+      authority_amplification_hops: [],
+      security_analysis: {
+        verdict: 'NOT_DETECTED',
+        finding: {
+          finding_id: 'AUTHZ-8814',
+          verdict: 'NOT_DETECTED',
+          trace_id: traceId,
+          initiating_principal: {
+            principal_id: 'nightly-summary-job',
+            principal_type: 'service',
+            service_name: 'reporting-api',
+          },
+          delegated_authority: {
+            permissions: ['reports:read'],
+            source: 'delegated',
+          },
+          effective_action: 'report.daily.read',
+          required_authority: ['reports:read'],
+          service_authority: {
+            permissions: ['reports:read'],
+            source: 'service',
+          },
+          attack_path: [],
+          evidence: {
+            resource: 'reports://daily-summary',
+          },
+          reason: 'The service identity and granted scope matched the requested report operation.',
+          severity: 'LOW',
+        },
+        reason: 'The service identity and granted scope matched the requested report operation.',
+        details: {},
+      },
+    };
+  }
+  return null;
 }
