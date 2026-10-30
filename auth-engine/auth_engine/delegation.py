@@ -24,7 +24,7 @@ from .models import (
 def compute_request_authority(
     original_authority: Authority,
     delegation_chain: list[DelegationStep],
-) -> Authority:
+) -> Authority | None:
     """
     Walk the delegation chain and return the request authority available
     at the *final* hop.
@@ -37,8 +37,11 @@ def compute_request_authority(
            previous request authority, it is an **explicit delegation
            addition** (e.g. a service adds ``payments:charge`` because
            the delegation policy says so).
-        4. Return the authority declared by the last explicit step (or the
-           original authority if no step was explicit).
+        4. A step with unknown scopes or an implicit edge makes the current
+           authority unknown; permissions do not propagate without explicit
+           delegation evidence.
+        5. Return the authority declared at the last known explicit hop, or
+           ``None`` when the final authority cannot be established.
 
     If the delegation chain is empty the original authority is returned
     (tagged as DELEGATED so downstream comparisons work uniformly).
@@ -49,13 +52,13 @@ def compute_request_authority(
             source=AuthoritySource.DELEGATED,
         )
 
-    current = Authority(
+    current: Authority | None = Authority(
         permissions=original_authority.permissions,
         source=AuthoritySource.DELEGATED,
     )
 
     for step in delegation_chain:
-        if step.explicit:
+        if step.explicit and step.scopes_known:
             # The delegated authority at this step becomes the new
             # request authority.  Authority may be narrowed OR
             # widened by explicit delegation.
@@ -64,10 +67,7 @@ def compute_request_authority(
                 source=AuthoritySource.DELEGATED,
             )
         else:
-            # Implicit (inferred) step: carry forward whatever was
-            # available before.  The service's own authority is
-            # *not* added.
-            pass  # current remains unchanged
+            current = None
 
     return current
 
@@ -84,7 +84,10 @@ def build_attack_path(
         path.append(str(initiating_principal))
 
     for step in delegation_chain:
-        perms = ", ".join(sorted(step.delegated_authority.permissions)) or "(none)"
+        if not step.explicit or not step.scopes_known:
+            perms = "unknown"
+        else:
+            perms = ", ".join(sorted(step.delegated_authority.permissions)) or "(none)"
         label = (
             f"{step.from_principal} → {step.to_principal} "
             f"[{step.credential_type.value}] "
@@ -98,24 +101,28 @@ def build_attack_path(
 def authority_at_each_hop(
     original_authority: Authority,
     delegation_chain: list[DelegationStep],
-) -> list[tuple[Identity, Authority]]:
+) -> list[tuple[Identity, Authority | None]]:
     """
     Return the request authority available *to* each principal in the
-    delegation chain.  Useful for auditing and explanation.
+    delegation chain. Unknown scope evidence or an implicit edge has no
+    established request authority and is represented by ``None``. Useful
+    for auditing and explanation.
     """
-    result: list[tuple[Identity, Authority]] = []
+    result: list[tuple[Identity, Authority | None]] = []
 
-    current = Authority(
+    current: Authority | None = Authority(
         permissions=original_authority.permissions,
         source=AuthoritySource.DELEGATED,
     )
 
     for step in delegation_chain:
-        if step.explicit:
+        if step.explicit and step.scopes_known:
             current = Authority(
                 permissions=step.delegated_authority.permissions,
                 source=AuthoritySource.DELEGATED,
             )
+        else:
+            current = None
         result.append((step.to_principal, current))
 
     return result

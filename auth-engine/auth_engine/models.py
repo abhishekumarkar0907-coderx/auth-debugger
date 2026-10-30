@@ -161,15 +161,16 @@ class DelegationStep:
     """
     One hop in the delegation chain.
 
-    Records *who* delegated *what* authority to *whom*, through what
-    credential mechanism, and whether the delegation was explicit.
+    Records who delegated authority to whom, through what credential
+    mechanism, and whether the delegation and its scope evidence are known.
     """
 
     from_principal: Identity
     to_principal: Identity
-    delegated_authority: Authority       # authority handed to the next hop
+    delegated_authority: Authority
     credential_type: CredentialType = CredentialType.UNKNOWN
-    explicit: bool = True                # False → implicit/inferred
+    explicit: bool = True
+    scopes_known: bool = True
 
 
 # ---------------------------------------------------------------------------

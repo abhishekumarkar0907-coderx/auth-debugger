@@ -121,7 +121,7 @@ class TestComputeRequestAuthority:
         result = compute_request_authority(orig, chain)
         assert result.permissions == frozenset({"payments:charge"})
 
-    def test_implicit_step_preserves_current(self):
+    def test_implicit_step_does_not_inherit_current_authority(self):
         orig = Authority.original("orders:read")
         chain = [
             DelegationStep(
@@ -136,12 +136,34 @@ class TestComputeRequestAuthority:
                 to_principal=CHECKOUT,
                 delegated_authority=Authority.delegated("something:else"),
                 credential_type=CredentialType.DELEGATED_TOKEN,
-                explicit=False,  # implicit — should NOT override
+                explicit=False,
             ),
         ]
         result = compute_request_authority(orig, chain)
-        # Implicit step does not change authority
-        assert result.permissions == frozenset({"orders:read"})
+        assert result is None
+
+    def test_explicitly_empty_scopes_differ_from_unknown_scopes(self):
+        orig = Authority.original("orders:read")
+        known_empty = DelegationStep(
+            from_principal=USER,
+            to_principal=CHECKOUT,
+            delegated_authority=Authority.empty(),
+            explicit=True,
+            scopes_known=True,
+        )
+        unknown = DelegationStep(
+            from_principal=USER,
+            to_principal=CHECKOUT,
+            delegated_authority=Authority.empty(),
+            explicit=True,
+            scopes_known=False,
+        )
+
+        known_result = compute_request_authority(orig, [known_empty])
+
+        assert known_result is not None
+        assert known_result.permissions == frozenset()
+        assert compute_request_authority(orig, [unknown]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -221,3 +243,17 @@ class TestAuthorityAtEachHop:
         orig = Authority.original("x")
         hops = authority_at_each_hop(orig, [])
         assert hops == []
+
+    def test_unknown_scope_is_not_returned_as_empty_authority(self):
+        orig = Authority.original("orders:read")
+        step = DelegationStep(
+            from_principal=USER,
+            to_principal=CHECKOUT,
+            delegated_authority=Authority.empty(),
+            explicit=True,
+            scopes_known=False,
+        )
+
+        hops = authority_at_each_hop(orig, [step])
+
+        assert hops == [(CHECKOUT, None)]

@@ -39,4 +39,5 @@ class TraceGraphResponse(BaseModel):
     trace_id: str
     nodes: list[dict[str, Any]]
     edges: list[dict[str, Any]]
+    authority_amplification_hops: list[dict[str, Any]]
     security_analysis: dict[str, Any]

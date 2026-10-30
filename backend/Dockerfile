@@ -6,10 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 COPY backend/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY auth-engine ./auth-engine
+RUN pip install --no-cache-dir -r requirements.txt ./auth-engine
 
 COPY backend/app ./app
-COPY auth-engine/auth_engine ./auth_engine
 
 EXPOSE 8000
 

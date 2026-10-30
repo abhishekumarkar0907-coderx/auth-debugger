@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+from hashlib import sha256
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from google.protobuf.message import DecodeError
 from pydantic import ValidationError
+from dataclasses import fields, is_dataclass
+from enum import Enum
 
 from auth_engine.context import AuthorizationContext, extract_authorization_context
 from auth_engine.delegation_policy import DelegationPolicy
@@ -23,15 +26,17 @@ from auth_engine.graph import (
 from auth_engine.models import DetectionResult, FindingType, Verdict
 from auth_engine.policy import default_otel_demo_policy
 
-from .otlp import normalize_traces
+from .otlp import InvalidOTLPTracePayload, normalize_traces
 from .schemas import (
     IngestResponse,
     SpanRecord,
     TraceGraphResponse,
     TraceSummary,
 )
+from .security_engine import analyze_security_spans, analyze_security_trace
 from .store import InMemorySpanStore
-
+from auth_engine.graph.adapter import build_graph_from_spans
+from auth_engine.graph import find_authority_amplification_hops
 
 app = FastAPI(
     title="Authorization Debugger Backend",
@@ -45,6 +50,39 @@ app = FastAPI(
 store = InMemorySpanStore(max_spans=5000)
 logger = logging.getLogger(__name__)
 action_policy = default_otel_demo_policy()
+analysis_results: dict[str, dict] = {}
+_analysis_signatures: dict[str, str] = {}
+SERVICE_AUTHORITY_CONFIG: dict[str, list[str]] = {}
+
+
+def _trace_signature(spans: list[SpanRecord]) -> str:
+    digest = sha256()
+    for span in spans:
+        digest.update(span.model_dump_json().encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _configured_service_authorities() -> dict[str, list[str]]:
+    configured = dict(SERVICE_AUTHORITY_CONFIG)
+    configured.update(_load_service_authorities())
+    return configured
+
+
+def _json_safe(value: object) -> object:
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _json_safe(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 @app.get("/health")
@@ -74,6 +112,70 @@ async def get_trace(trace_id: str) -> list[SpanRecord]:
     if not spans:
         raise HTTPException(status_code=404, detail="Trace not found")
     return spans
+
+
+@app.post("/api/v1/demo/unauthorized-delegation")
+async def load_unauthorized_delegation_demo() -> dict[str, object]:
+    if (
+        os.getenv("AUTH_DEBUGGER_ENV") != "development"
+        or os.getenv("AUTH_DEBUGGER_ENABLE_DEMO_TRACE", "").lower() != "true"
+    ):
+        raise HTTPException(status_code=404, detail="Demo trace not found")
+
+    trace_id = "demo-unauthorized-delegation-v1"
+    store.add(
+        SpanRecord(
+            trace_id=trace_id,
+            span_id="demo-checkout",
+            parent_span_id=None,
+            service_name="frontend",
+            span_name="POST /checkout",
+            start_time_unix_nano=1_000_000_000,
+            end_time_unix_nano=1_025_000_000,
+            duration_ms=25.0,
+            span_kind=1,
+            status_code=1,
+            attributes={
+                "enduser.id": "demo-user",
+                "authz.principal.id": "demo-user",
+                "authz.principal.type": "user",
+                "authz.principal.scopes": "orders:read",
+                "authz.delegation.from": "demo-user",
+                "authz.delegation.to": "checkout-svc",
+                "authz.delegation.scopes": "orders:read",
+                "authz.credential.type": "user_token",
+            },
+        )
+    )
+    store.add(
+        SpanRecord(
+            trace_id=trace_id,
+            span_id="demo-payment",
+            parent_span_id="demo-checkout",
+            service_name="payment",
+            span_name="oteldemo.PaymentService/Charge",
+            start_time_unix_nano=1_025_000_000,
+            end_time_unix_nano=1_050_000_000,
+            duration_ms=25.0,
+            span_kind=1,
+            status_code=1,
+            attributes={
+                "enduser.id": "demo-user",
+                "authz.principal.id": "demo-user",
+                "authz.principal.type": "user",
+                "authz.principal.scopes": "orders:read",
+                "authz.delegation.from": "checkout-svc",
+                "authz.delegation.to": "payment-svc",
+                "authz.delegation.scopes": "orders:read,payments:charge",
+                "authz.credential.type": "service_credential",
+            },
+        )
+    )
+    return {
+        "trace_id": trace_id,
+        "spans": 2,
+        "graph_url": f"/api/v1/traces/{trace_id}/graph",
+    }
 
 
 def _load_service_authorities() -> dict[str, list[str]]:
@@ -160,8 +262,10 @@ def _serialize_finding(result: DetectionResult) -> dict:
     delegated_authority = finding.delegated_authority
     service_authority = finding.service_authority
     return {
+        "finding_id": finding.finding_id,
         "verdict": finding.verdict.value,
         "finding_type": finding.finding_type.value,
+        "classification": finding.finding_type.value,
         "severity": finding.severity.value,
         "trace_id": finding.trace_id,
         "initiating_principal": (
@@ -185,6 +289,7 @@ def _serialize_finding(result: DetectionResult) -> dict:
         "attack_path": finding.attack_path,
         "evidence": finding.evidence,
         "reason": result.reason,
+        "explanation": result.reason,
     }
 
 
@@ -201,6 +306,8 @@ def _serialize_analysis(
             f"Insufficient evidence: {warning_summary or 'analysis inputs are incomplete'}"
         )
         return {
+            "trace_id": context.trace_id,
+            "status": Verdict.INSUFFICIENT_EVIDENCE.value,
             "verdict": Verdict.INSUFFICIENT_EVIDENCE.value,
             "reason": reason,
             "finding": {
@@ -210,6 +317,15 @@ def _serialize_analysis(
                 "reason": reason,
             },
             "details": {},
+            "findings": [],
+            "evidence_warnings": [
+                {
+                    "field": warning.field,
+                    "type": warning.warning_type,
+                    "message": warning.message,
+                }
+                for warning in context.warnings
+            ],
             "context": {
                 "warnings": [
                     {
@@ -233,11 +349,27 @@ def _serialize_analysis(
             },
         }
 
+    finding = _serialize_finding(result)
     return {
+        "trace_id": context.trace_id,
+        "status": result.verdict.value,
         "verdict": result.verdict.value,
         "reason": result.reason,
-        "finding": _serialize_finding(result),
+        "finding": finding,
+        "findings": (
+            [{**finding, "details": result.details}]
+            if result.verdict is Verdict.DETECTED
+            else []
+        ),
         "details": result.details,
+        "evidence_warnings": [
+            {
+                "field": warning.field,
+                "type": warning.warning_type,
+                "message": warning.message,
+            }
+            for warning in context.warnings
+        ],
         "context": {
             "warnings": [
                 {
@@ -321,30 +453,34 @@ async def trace_graph(trace_id: str) -> TraceGraphResponse:
     try:
         context = extract_authorization_context(
             spans,
-            service_authority_config=_load_service_authorities(),
+            service_authority_config=_configured_service_authorities(),
         )
         graph = AuthorizationGraph()
         result: DetectionResult | None = None
         reason_override: str | None = None
 
-        delegation_warnings = [
-            warning
-            for warning in context.warnings
-            if warning.field.startswith("delegation.")
-        ]
         if context.has_sufficient_evidence():
             scenario = context.to_scenario(policy=action_policy)
             graph.load_scenario(scenario)
-            if delegation_warnings:
-                reason_override = (
-                    "Insufficient evidence: delegation metadata is incomplete "
-                    "or malformed"
-                )
-            elif context.outcome_success is True:
+            delegation_warnings = [
+                warning
+                for warning in context.warnings
+                if warning.field.startswith("delegation.")
+            ]
+            if context.outcome_success is True:
                 result = ConfusedDeputyDetector(
                     policy=action_policy,
                     delegation_policy=_load_delegation_policy(),
                 ).analyze(scenario)
+                if (
+                    delegation_warnings
+                    and result.verdict is Verdict.NOT_DETECTED
+                ):
+                    result = None
+                    reason_override = (
+                        "Insufficient evidence: delegation metadata is "
+                        "incomplete or malformed"
+                    )
             elif context.outcome_success is False:
                 reason_override = (
                     "Insufficient evidence: the effective operation failed; "
@@ -379,6 +515,9 @@ async def trace_graph(trace_id: str) -> TraceGraphResponse:
         trace_id=trace_id,
         nodes=nodes,
         edges=edges,
+        authority_amplification_hops=_json_safe(
+            find_authority_amplification_hops(graph, trace_id=trace_id)
+        ),
         security_analysis=_serialize_analysis(
             context,
             result,
@@ -386,6 +525,58 @@ async def trace_graph(trace_id: str) -> TraceGraphResponse:
         ),
     )
 
+@app.post("/api/v1/analysis/{trace_id}")
+async def post_analysis(trace_id: str) -> dict:
+    spans = store.trace(trace_id)
+    if not spans:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    try:
+        result = analyze_security_trace(
+            spans,
+            service_authority_config=_configured_service_authorities(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Security analysis failed for trace %s", trace_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Analysis could not be completed.",
+        ) from exc
+    analysis_results[trace_id] = result
+    _analysis_signatures[trace_id] = _trace_signature(spans)
+    return result
+
+
+@app.get("/api/v1/analysis/{trace_id}")
+async def get_analysis(trace_id: str) -> dict:
+    spans = store.trace(trace_id)
+    if not spans:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    signature = _trace_signature(spans)
+    result = analysis_results.get(trace_id)
+    cached_signature = _analysis_signatures.get(trace_id)
+    if result is None or (
+        cached_signature is not None and cached_signature != signature
+    ):
+        try:
+            result = analyze_security_trace(
+                spans,
+                service_authority_config=_configured_service_authorities(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Security analysis failed for trace %s", trace_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Analysis could not be completed.",
+            ) from exc
+        analysis_results[trace_id] = result
+        _analysis_signatures[trace_id] = signature
+    elif cached_signature is None:
+        _analysis_signatures[trace_id] = signature
+    return result
 
 @app.post(
     "/v1/traces",
@@ -413,11 +604,17 @@ async def ingest_traces(
 
     try:
         resource_span_count, records = normalize_traces(body)
-    except (DecodeError, ValidationError, ValueError) as exc:
+    except (InvalidOTLPTracePayload, DecodeError, ValidationError, ValueError) as exc:
         logger.warning("Rejected invalid OTLP trace payload (%s)", type(exc).__name__)
         raise HTTPException(
             status_code=400,
-            detail="Invalid OTLP trace payload",
+            detail="Invalid OTLP trace payload.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected failure while normalizing OTLP traces")
+        raise HTTPException(
+            status_code=500,
+            detail="Trace ingestion could not be completed.",
         ) from exc
 
     for record in records:

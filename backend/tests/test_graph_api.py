@@ -260,7 +260,7 @@ def test_graph_api_rejects_malformed_otlp_input() -> None:
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid OTLP trace payload"
+    assert response.json()["detail"] == "Invalid OTLP trace payload."
 
 
 def test_graph_api_treats_malformed_authority_as_insufficient() -> None:

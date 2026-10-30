@@ -7,6 +7,9 @@ Takes an ``AuthorizationScenario`` and produces a deterministic
 
 from __future__ import annotations
 
+import json
+import uuid
+
 from .delegation import build_attack_path, compute_request_authority
 from .models import (
     Authority,
@@ -92,12 +95,21 @@ class ConfusedDeputyDetector:
             scenario.delegation_chain,
         )
 
-        # Reject explicit permission expansions without a trusted grant.
+        # Reject explicit expansions without a grant and independently
+        # denied permissions on known delegation edges.
         unauthorized_expansions = self._find_unauthorized_expansions(scenario)
         if unauthorized_expansions:
             summary = "; ".join(
-                f"{from_id} -> {to_id}: {', '.join(sorted(permissions))}"
-                for from_id, to_id, permissions in unauthorized_expansions
+                f"{from_id} -> {to_id}: {', '.join(sorted(permissions))} "
+                f"({basis})"
+                for from_id, to_id, permissions, basis in unauthorized_expansions
+            )
+            reason_override = (
+                "Unauthorized delegation detected: "
+                f"{summary}. Permissions outside a known baseline are not "
+                "treated as newly added unless the prior authority is known; "
+                "the edge-specific trusted grant does not authorize the "
+                "identified permissions."
             )
             result = self._detected(
                 scenario,
@@ -109,21 +121,57 @@ class ConfusedDeputyDetector:
                     f"delegation grant ({summary})"
                 ),
                 finding_type=FindingType.UNAUTHORIZED_DELEGATION,
-                reason_override=(
-                    "Unauthorized permission expansion detected: "
-                    f"{summary}. No matching trusted delegation grant authorizes "
-                    "these permissions."
-                ),
+                reason_override=reason_override,
             )
             result.details["unauthorized_expansions"] = [
                 {
                     "from_principal": from_id,
                     "to_principal": to_id,
                     "permissions": sorted(permissions),
+                    "basis": basis,
                 }
-                for from_id, to_id, permissions in unauthorized_expansions
+                for from_id, to_id, permissions, basis in unauthorized_expansions
             ]
             return result
+
+        # Unknown scopes and inferred delegation cannot establish
+        # authorization or denial.
+        unknown_scope_hops = [
+            (
+                step.from_principal.principal_id,
+                step.to_principal.principal_id,
+                (
+                    "scope evidence is missing or malformed"
+                    if step.explicit
+                    else "delegation is not explicit"
+                ),
+            )
+            for step in scenario.delegation_chain
+            if not step.explicit or not step.scopes_known
+        ]
+
+        if unknown_scope_hops:
+            affected_hops = ", ".join(
+                f"{from_id} -> {to_id} ({evidence_status})"
+                for from_id, to_id, evidence_status in unknown_scope_hops
+            )
+            return self._insufficient(
+                scenario,
+                reason=(
+                    "Cannot determine the authorization verdict because "
+                    "delegation evidence is incomplete for: "
+                    f"{affected_hops}"
+                ),
+            )
+
+        if request_authority is None:
+            return self._insufficient(
+                scenario,
+                reason=(
+                    "Cannot determine the authorization verdict because "
+                    "the final delegated request authority is unknown"
+                ),
+            )
 
         # ---- Step 4 + 5: Compare required vs. request -------------------
 
@@ -193,18 +241,33 @@ class ConfusedDeputyDetector:
 
     def _find_unauthorized_expansions(
         self, scenario: AuthorizationScenario
-    ) -> list[tuple[str, str, frozenset[str]]]:
-        """Find explicit permission additions without a matching trusted grant."""
+    ) -> list[tuple[str, str, frozenset[str], str]]:
+        """Find ungranted additions and independent explicit-edge violations."""
         assert scenario.original_authority is not None
 
-        current = scenario.original_authority.permissions
-        unauthorized = []
+        # None means the previous hop's authority cannot be established.
+        current: frozenset[str] | None = (
+            scenario.original_authority.permissions
+        )
+        unauthorized: list[tuple[str, str, frozenset[str], str]] = []
 
         for step in scenario.delegation_chain:
             if not step.explicit:
+                current = None
+                continue
+
+            # Missing or malformed scopes are unknown, not an empty grant.
+            if not step.scopes_known:
+                current = None
                 continue
 
             declared = step.delegated_authority.permissions
+
+            # We cannot calculate additions without a trustworthy baseline.
+            if current is None:
+                current = declared
+                continue
+
             additions = declared - current
 
             unauthorized_additions = frozenset(
@@ -218,11 +281,14 @@ class ConfusedDeputyDetector:
             )
 
             if unauthorized_additions:
-                unauthorized.append((
-                    step.from_principal.principal_id,
-                    step.to_principal.principal_id,
-                    unauthorized_additions,
-                ))
+                unauthorized.append(
+                    (
+                        step.from_principal.principal_id,
+                        step.to_principal.principal_id,
+                        unauthorized_additions,
+                        "known prior authority",
+                    )
+                )
 
             current = declared
 
@@ -308,7 +374,7 @@ class ConfusedDeputyDetector:
         self,
         scenario: AuthorizationScenario,
         *,
-        request_authority: Authority,
+        request_authority: Authority | None,
         required: frozenset[str],
         service_authority: Authority | None,
         reason_suffix: str,
@@ -316,7 +382,11 @@ class ConfusedDeputyDetector:
         reason_override: str | None = None,
     ) -> DetectionResult:
         required_str = ", ".join(sorted(required))
-        request_str = ", ".join(sorted(request_authority.permissions)) or "(none)"
+        request_str = (
+            ", ".join(sorted(request_authority.permissions))
+            if request_authority is not None
+            else "(unknown)"
+        ) or "(none)"
 
         if reason_override is not None:
             reason = reason_override
@@ -332,6 +402,9 @@ class ConfusedDeputyDetector:
         )
 
         finding = Finding(
+            finding_id=self._stable_finding_id(
+                scenario, Verdict.DETECTED, finding_type, reason
+            ),
             verdict=Verdict.DETECTED,
             finding_type=finding_type,
             trace_id=scenario.trace_id,
@@ -356,7 +429,12 @@ class ConfusedDeputyDetector:
             reason=reason,
             details={
                 "required_action": sorted(required),
-                "request_authority": sorted(request_authority.permissions),
+                "request_authority": (
+                    sorted(request_authority.permissions)
+                    if request_authority is not None
+                    else None
+                ),
+                "request_authority_known": request_authority is not None,
                 "service_authority": (
                     sorted(service_authority.permissions)
                     if service_authority
@@ -382,6 +460,9 @@ class ConfusedDeputyDetector:
         )
 
         finding = Finding(
+            finding_id=self._stable_finding_id(
+                scenario, Verdict.NOT_DETECTED, FindingType.NONE, reason
+            ),
             verdict=Verdict.NOT_DETECTED,
             finding_type=FindingType.NONE,
             trace_id=scenario.trace_id,
@@ -416,6 +497,12 @@ class ConfusedDeputyDetector:
         reason: str,
     ) -> DetectionResult:
         finding = Finding(
+            finding_id=self._stable_finding_id(
+                scenario,
+                Verdict.INSUFFICIENT_EVIDENCE,
+                FindingType.NONE,
+                reason,
+            ),
             verdict=Verdict.INSUFFICIENT_EVIDENCE,
             finding_type=FindingType.NONE,
             trace_id=scenario.trace_id,
@@ -429,3 +516,64 @@ class ConfusedDeputyDetector:
             finding=finding,
             reason=reason,
         )
+
+    @staticmethod
+    def _stable_finding_id(
+        scenario: AuthorizationScenario,
+        verdict: Verdict,
+        finding_type: FindingType,
+        reason: str,
+    ) -> str:
+        """Create a stable identifier from the scenario's security evidence."""
+        operation = scenario.effective_operation
+        payload = {
+            "trace_id": scenario.trace_id,
+            "initiating_principal": (
+                (
+                    scenario.initiating_principal.principal_id,
+                    scenario.initiating_principal.principal_type.value,
+                    scenario.initiating_principal.service_name,
+                )
+                if scenario.initiating_principal is not None
+                else None
+            ),
+            "original_authority": (
+                sorted(scenario.original_authority.permissions)
+                if scenario.original_authority is not None
+                else None
+            ),
+            "delegation_chain": [
+                {
+                    "from": step.from_principal.principal_id,
+                    "from_type": step.from_principal.principal_type.value,
+                    "to": step.to_principal.principal_id,
+                    "to_type": step.to_principal.principal_type.value,
+                    "permissions": sorted(step.delegated_authority.permissions),
+                    "credential_type": step.credential_type.value,
+                    "explicit": step.explicit,
+                    "scopes_known": step.scopes_known,
+                }
+                for step in scenario.delegation_chain
+            ],
+            "operation": (
+                {
+                    "service": operation.service,
+                    "span": operation.raw_span_name,
+                    "action": operation.semantic_action,
+                    "target_resource": operation.target_resource,
+                    "required": sorted(operation.required_authority),
+                }
+                if operation is not None
+                else None
+            ),
+            "service_authority": (
+                sorted(scenario.acting_service_authority.permissions)
+                if scenario.acting_service_authority is not None
+                else None
+            ),
+            "verdict": verdict.value,
+            "finding_type": finding_type.value,
+            "reason": reason,
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, serialized))
