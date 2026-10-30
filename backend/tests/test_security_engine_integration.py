@@ -124,6 +124,40 @@ def test_graph_keeps_unknown_delegated_authority_insufficient() -> None:
     )
 
 
+def test_graph_reports_configured_confused_deputy_amplification() -> None:
+    from app.main import SERVICE_AUTHORITY_CONFIG
+
+    spans = _unauthorized_expansion_spans()
+    spans[0].attributes["authz.delegation.scopes"] = ["orders:read"]
+    spans[1].attributes["authz.delegation.scopes"] = ["orders:read"]
+    for span in spans:
+        store.add(span)
+
+    original_config = SERVICE_AUTHORITY_CONFIG.copy()
+    try:
+        SERVICE_AUTHORITY_CONFIG["payment"] = ["payments:charge"]
+
+        response = client.get(f"/api/v1/traces/{TRACE_ID}/graph")
+
+        assert response.status_code == 200
+        graph = response.json()
+        assert graph["trace_id"] == TRACE_ID
+        assert graph["security_analysis"]["trace_id"] == TRACE_ID
+        assert graph["security_analysis"]["verdict"] == "DETECTED"
+        assert graph["security_analysis"]["finding"]["finding_type"] == (
+            "CONFUSED_DEPUTY"
+        )
+        assert len(graph["authority_amplification_hops"]) == 1
+        hop = graph["authority_amplification_hops"][0]
+        assert hop["trace_id"] == TRACE_ID
+        assert hop["from_principal_id"] == "checkout"
+        assert hop["to_service_id"] == "payment"
+        assert hop["amplified_permissions"] == ["payments:charge"]
+    finally:
+        SERVICE_AUTHORITY_CONFIG.clear()
+        SERVICE_AUTHORITY_CONFIG.update(original_config)
+
+
 def test_graph_missing_trace_returns_existing_404_response() -> None:
     response = client.get("/api/v1/traces/missing-security-trace/graph")
 

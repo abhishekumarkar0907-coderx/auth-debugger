@@ -18,6 +18,9 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({
   const warnings = analysis?.context?.warnings ?? [];
   const finding = analysis?.finding;
   const findingType = finding?.finding_type;
+  const findingEvidence = finding?.evidence;
+  const attackPath = Array.isArray(finding?.attack_path) ? finding.attack_path : [];
+  const hasFindingEvidence = findingEvidence !== undefined && findingEvidence !== null;
   const details = analysis?.details;
   const hasDetails = details && Object.keys(details).length > 0;
 
@@ -50,6 +53,27 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({
             </p>
           )}
           {analysis.reason && <p className="security-analysis-reason">{analysis.reason}</p>}
+          {(hasFindingEvidence || attackPath.length > 0) && (
+            <details className="security-analysis-details">
+              <summary>Finding evidence</summary>
+              {attackPath.length > 0 && (
+                <>
+                  <h4>Attack path</h4>
+                  <ol>
+                    {attackPath.map((step, index) => (
+                      <li key={`${index}-${step}`}>{step}</li>
+                    ))}
+                  </ol>
+                </>
+              )}
+              {hasFindingEvidence && (
+                <>
+                  <h4>Supporting evidence</h4>
+                  <pre>{formatJson(findingEvidence)}</pre>
+                </>
+              )}
+            </details>
+          )}
           {hasDetails && (
             <details className="security-analysis-details">
               <summary>Analysis details</summary>

@@ -270,6 +270,7 @@ def test_post_analysis_detects_unauthorized_delegation_expansion() -> None:
             "authority_amplification_hops",
         } <= graph_body.keys()
         assert graph_body["security_analysis"]["verdict"] == "DETECTED"
+        assert graph_body["security_analysis"]["trace_id"] == trace_id
         finding = graph_body["security_analysis"]["findings"][0]
         assert finding["classification"] == "UNAUTHORIZED_DELEGATION"
         assert finding["severity"]

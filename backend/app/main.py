@@ -13,6 +13,7 @@ from .security_engine import analyze_security_spans, analyze_security_trace
 from .store import InMemorySpanStore
 from auth_engine.graph.adapter import build_graph_from_spans
 from auth_engine.graph import find_authority_amplification_hops
+from auth_engine.policy import default_otel_demo_policy
 
 app = FastAPI(
     title="Authorization Debugger Backend",
@@ -156,7 +157,11 @@ async def get_trace_graph(trace_id: str) -> dict[str, object]:
             return value
         return str(value)
 
-    graph = build_graph_from_spans(spans)
+    graph = build_graph_from_spans(
+        spans,
+        policy=default_otel_demo_policy(),
+        service_authority_config=SERVICE_AUTHORITY_CONFIG,
+    )
     hops = find_authority_amplification_hops(graph, trace_id=trace_id)
     security_analysis = analyze_security_trace(
         spans,
