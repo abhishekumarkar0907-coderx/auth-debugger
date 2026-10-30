@@ -593,3 +593,25 @@ def test_neither_authority_has_required_permission():
     assert result.verdict == Verdict.DETECTED
     assert "neither the delegated request authority" in result.reason
     assert result.details["service_authority"] == ["orders:read"]
+
+
+def test_unknown_service_authority_produces_insufficient_evidence():
+    scenario = AuthorizationScenario(
+        trace_id="trace-unknown-service-authority",
+        initiating_principal=USER_123,
+        original_authority=Authority.original("orders:read"),
+        delegation_chain=[],
+        effective_operation=Operation(
+            service="payment-svc",
+            raw_span_name="oteldemo.PaymentService/Charge",
+            semantic_action="payments:charge",
+            target_resource=None,
+            required_authority=frozenset({"payments:charge"}),
+        ),
+        acting_service_authority=None,
+    )
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+    assert "service's authority is not configured" in result.reason

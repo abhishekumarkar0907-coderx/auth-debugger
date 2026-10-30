@@ -31,6 +31,7 @@ import pytest
 from auth_engine.context import (
     ATTR_CREDENTIAL_TYPE,
     ATTR_DELEGATION_FROM,
+    ATTR_DELEGATION_SCOPES,
     ATTR_DELEGATION_TO,
     ATTR_ENDUSER_ID,
     ATTR_PRINCIPAL_ID,
@@ -394,6 +395,53 @@ class TestPartialDelegation:
         ctx = extract_authorization_context(spans)
         scenario = ctx.to_scenario()
         assert len(scenario.delegation_chain) == 0
+
+
+class TestDelegatedScopes:
+    def test_explicit_delegated_scopes_are_preserved(self):
+        spans = [
+            FakeSpan(
+                span_name="oteldemo.PaymentService/Charge",
+                service_name="payment",
+                status_code=1,
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: "orders:read",
+                    ATTR_DELEGATION_FROM: "user-123",
+                    ATTR_DELEGATION_TO: "payment",
+                    ATTR_DELEGATION_SCOPES: ["payments:charge"],
+                },
+            )
+        ]
+
+        context = extract_authorization_context(spans)
+        scenario = context.to_scenario(policy=default_otel_demo_policy())
+
+        assert scenario.delegation_chain[0].delegated_authority.permissions == {
+            "payments:charge"
+        }
+
+    def test_malformed_delegated_scopes_are_warned(self):
+        spans = [
+            FakeSpan(
+                span_name="oteldemo.PaymentService/Charge",
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: "orders:read",
+                    ATTR_DELEGATION_FROM: "user-123",
+                    ATTR_DELEGATION_TO: "payment",
+                    ATTR_DELEGATION_SCOPES: ["payments:charge", 42],
+                },
+            )
+        ]
+
+        context = extract_authorization_context(spans)
+
+        assert any(
+            warning.field == "delegation.authority"
+            and warning.warning_type == "malformed"
+            for warning in context.warnings
+        )
 
 
 # ===================================================================
@@ -1199,6 +1247,27 @@ class TestMalformedScopes:
         ]
         ctx = extract_authorization_context(spans)
         assert ctx.original_scopes is None
+
+    def test_partially_malformed_scopes_are_insufficient(self):
+        spans = [
+            FakeSpan(
+                span_name="GET /test",
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: ["orders:read", 42],
+                },
+            )
+        ]
+
+        ctx = extract_authorization_context(spans)
+
+        assert ctx.original_scopes == ["orders:read"]
+        assert not ctx.has_sufficient_evidence()
+        assert any(
+            warning.field == "original_authority"
+            and warning.warning_type == "malformed"
+            for warning in ctx.warnings
+        )
 
     def test_json_array_scopes_parsed(self):
         spans = [

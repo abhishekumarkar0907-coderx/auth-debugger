@@ -166,6 +166,15 @@ class ConfusedDeputyDetector:
                 ),
             )
 
+        if service_authority is None:
+            return self._insufficient(
+                scenario,
+                reason=(
+                    "Cannot determine whether the operation was authorized: "
+                    "the acting service's authority is not configured"
+                ),
+            )
+
         # The service also lacks the authority — still a problem (the
         # action should not have been possible at all), but it is a
         # confused-deputy in the sense that there was no legitimate

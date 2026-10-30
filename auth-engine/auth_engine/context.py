@@ -69,6 +69,7 @@ ATTR_PRINCIPAL_TYPE = "authz.principal.type"
 ATTR_PRINCIPAL_SCOPES = "authz.principal.scopes"
 ATTR_DELEGATION_FROM = "authz.delegation.from"
 ATTR_DELEGATION_TO = "authz.delegation.to"
+ATTR_DELEGATION_SCOPES = "authz.delegation.scopes"
 ATTR_CREDENTIAL_TYPE = "authz.credential.type"
 ATTR_TARGET_RESOURCE = "authz.target.resource"
 
@@ -149,7 +150,7 @@ class RawDelegationHop:
     from_id: str | None = None
     to_id: str | None = None
     credential_type_raw: str | None = None
-    scopes_raw: str | list[str] | None = None
+    scopes_raw: Any = None
     span_id: str | None = None
 
 
@@ -221,15 +222,17 @@ class AuthorizationContext:
         an effective action.  Conflicting evidence on critical fields
         (principal identity) disqualifies the context.
         """
-        if self.has_conflicting_evidence:
-            # Check if the conflict is on a critical field
-            critical_fields = {
-                "initiating_principal.id",
-                "initiating_principal.type",
-            }
-            for w in self.warnings:
-                if w.warning_type == "conflicting" and w.field in critical_fields:
-                    return False
+        critical_fields = {
+            "initiating_principal.id",
+            "initiating_principal.type",
+            "original_authority",
+        }
+        for warning in self.warnings:
+            if (
+                warning.warning_type in {"conflicting", "malformed"}
+                and warning.field in critical_fields
+            ):
+                return False
 
         return self.has_principal and self.has_authority and self.has_action
 
@@ -256,6 +259,13 @@ class AuthorizationContext:
                 missing_parts.append("effective action")
             if self.has_conflicting_evidence:
                 missing_parts.append("conflicting evidence on critical fields")
+            if any(
+                warning.warning_type == "malformed"
+                and warning.field
+                in {"initiating_principal.id", "initiating_principal.type", "original_authority"}
+                for warning in self.warnings
+            ):
+                missing_parts.append("malformed evidence on critical fields")
             raise ValueError(
                 "Cannot build AuthorizationScenario: "
                 + ", ".join(missing_parts)
@@ -325,8 +335,9 @@ class AuthorizationContext:
             if hop.scopes_raw is not None:
                 delegated_perms = _parse_scopes(hop.scopes_raw)
 
-            # If no scopes on the hop, carry forward original authority
-            if not delegated_perms:
+            # Only absent scopes inherit the original authority; an explicit
+            # empty or malformed value must not silently broaden the request.
+            if hop.scopes_raw is None:
                 delegated_perms = frozenset(self.original_scopes or [])
 
             from_principal = Identity(
@@ -454,6 +465,20 @@ def _parse_scopes(raw: Any) -> frozenset[str]:
     return frozenset()
 
 
+def _has_malformed_scope_items(raw: Any) -> bool:
+    if isinstance(raw, list):
+        return any(not isinstance(item, str) for item in raw)
+    if isinstance(raw, str) and raw.strip().startswith("["):
+        try:
+            parsed = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            return True
+        return not isinstance(parsed, list) or any(
+            not isinstance(item, str) for item in parsed
+        )
+    return not isinstance(raw, str)
+
+
 # ---------------------------------------------------------------------------
 # Main extraction function
 # ---------------------------------------------------------------------------
@@ -564,9 +589,15 @@ def extract_authorization_context(
 
         deleg_from = attrs.get(ATTR_DELEGATION_FROM)
         deleg_to = attrs.get(ATTR_DELEGATION_TO)
+        deleg_scopes = attrs.get(ATTR_DELEGATION_SCOPES)
         cred_type = attrs.get(ATTR_CREDENTIAL_TYPE)
 
-        if deleg_from is not None or deleg_to is not None or cred_type is not None:
+        if (
+            deleg_from is not None
+            or deleg_to is not None
+            or deleg_scopes is not None
+            or cred_type is not None
+        ):
             hop = RawDelegationHop(
                 from_id=(
                     deleg_from.strip()
@@ -583,6 +614,7 @@ def extract_authorization_context(
                     if isinstance(cred_type, str) and cred_type.strip()
                     else None
                 ),
+                scopes_raw=deleg_scopes,
                 span_id=span.span_id,
             )
             delegation_hops.append(hop)
@@ -816,6 +848,18 @@ def _resolve_scopes(
     parsed_sets: list[tuple[frozenset[str], str, str]] = []
     for raw, src, sid in candidates:
         parsed = _parse_scopes(raw)
+        if parsed and _has_malformed_scope_items(raw):
+            ctx.warnings.append(
+                ExtractionWarning(
+                    field="original_authority",
+                    warning_type="malformed",
+                    message=(
+                        f"Some scopes from {ATTR_PRINCIPAL_SCOPES} on span "
+                        f"{sid} are malformed"
+                    ),
+                    sources=[ATTR_PRINCIPAL_SCOPES],
+                )
+            )
         if not parsed:
             ctx.warnings.append(
                 ExtractionWarning(
@@ -992,6 +1036,29 @@ def _resolve_delegation(
                     confidence="explicit",
                 )
             )
+        if hop.scopes_raw is not None:
+            parsed_scopes = _parse_scopes(hop.scopes_raw)
+            ctx.evidence.append(
+                EvidenceItem(
+                    field="delegation.authority",
+                    value=sorted(parsed_scopes),
+                    source=f"span_attribute:{ATTR_DELEGATION_SCOPES}",
+                    span_id=hop.span_id,
+                    confidence="explicit",
+                )
+            )
+            if _has_malformed_scope_items(hop.scopes_raw):
+                ctx.warnings.append(
+                    ExtractionWarning(
+                        field="delegation.authority",
+                        warning_type="malformed",
+                        message=(
+                            f"Could not parse delegated scopes from "
+                            f"{ATTR_DELEGATION_SCOPES} on span {hop.span_id}"
+                        ),
+                        sources=[ATTR_DELEGATION_SCOPES],
+                    )
+                )
 
 
 def _resolve_effective_action(

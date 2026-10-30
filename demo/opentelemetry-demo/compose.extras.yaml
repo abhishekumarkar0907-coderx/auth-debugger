@@ -1,8 +1,8 @@
 services:
   backend:
     build:
-      context: ../../backend
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: backend/Dockerfile
     container_name: auth-debugger-backend
     ports:
       - "8000:8000"
@@ -13,4 +13,3 @@ services:
     depends_on:
       backend:
         condition: service_started
-
