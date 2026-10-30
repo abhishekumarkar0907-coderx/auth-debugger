@@ -142,6 +142,7 @@ def test_standalone_analysis_reports_demo_unauthorized_delegation() -> None:
     assert analysis["trace_id"] == DEMO_TRACE_ID
     assert analysis["verdict"] == "DETECTED"
     finding = analysis["finding"]
+    assert analysis["reason"] == finding["reason"]
     assert finding["verdict"] == "DETECTED"
     assert finding["finding_type"] == "UNAUTHORIZED_DELEGATION"
     assert finding["severity"] == "HIGH"

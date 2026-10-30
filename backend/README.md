@@ -30,6 +30,20 @@ From this directory:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+$env:PYTHONPATH = "..\auth-engine"
+```
+
+To enable the development demo trace, set both opt-in variables in this
+terminal before starting the backend:
+
+```powershell
+$env:AUTH_DEBUGGER_ENV = "development"
+$env:AUTH_DEBUGGER_ENABLE_DEMO_TRACE = "true"
+```
+
+Start the backend:
+
+```powershell
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -48,7 +62,8 @@ http://localhost:8000/docs
 Run tests:
 
 ```powershell
-pytest
+$env:PYTHONPATH = "..\auth-engine"
+python -m pytest
 ```
 
 ## OTLP endpoint
@@ -66,4 +81,8 @@ POST /v1/traces
 GET  /api/v1/spans
 GET  /api/v1/traces
 GET  /api/v1/traces/{trace_id}
+GET  /api/v1/traces/{trace_id}/graph
+GET  /api/v1/analysis/{trace_id}
+POST /api/v1/analysis/{trace_id}
+POST /api/v1/demo/unauthorized-delegation  # development opt-in required
 ```

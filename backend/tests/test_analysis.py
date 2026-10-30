@@ -62,6 +62,7 @@ def test_post_analysis_insufficient_evidence_is_preserved() -> None:
     body = response.json()
     assert body["trace_id"] == TRACE_ID
     assert body["status"] == "INSUFFICIENT_EVIDENCE"
+    assert body["reason"] == body["finding"]["reason"]
     assert "findings" in body
     assert "analyzed_at" in body
     assert "errors" in body
