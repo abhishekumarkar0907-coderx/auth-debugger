@@ -204,9 +204,19 @@ def test_graph_api_returns_insufficient_evidence_for_incomplete_delegation() -> 
 
     assert response.status_code == 200
     result = response.json()
-    assert result["security_analysis"]["verdict"] == "INSUFFICIENT_EVIDENCE"
-    assert "delegation metadata is incomplete" in result["security_analysis"]["reason"]
+    analysis = result["security_analysis"]
+    assert analysis["status"] == analysis["verdict"] == "INSUFFICIENT_EVIDENCE"
+    assert analysis["finding"]["verdict"] == analysis["verdict"]
+    assert analysis["finding"]["finding_type"] == "NONE"
+    assert "Delegation relationship evidence is incomplete" in (
+        analysis["reason"]
+    )
+    assert any(
+        warning["field"] == "delegation.to"
+        for warning in analysis["finding"]["evidence"]["extraction_warnings"]
+    )
     assert result["nodes"]
+    assert not any(edge["type"] == "delegation" for edge in result["edges"])
 
 
 def test_graph_api_does_not_infer_missing_service_authority() -> None:

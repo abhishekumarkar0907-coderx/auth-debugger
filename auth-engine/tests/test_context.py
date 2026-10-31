@@ -52,6 +52,7 @@ from auth_engine.models import (
     AuthorizationScenario,
     CredentialType,
     DelegationStep,
+    FindingType,
     Identity,
     Operation,
     PrincipalType,
@@ -397,6 +398,29 @@ class TestPartialDelegation:
         ctx = extract_authorization_context(spans)
         scenario = ctx.to_scenario()
         assert len(scenario.delegation_chain) == 0
+
+    def test_incomplete_hop_cannot_be_misread_as_direct_authorization(self):
+        spans = [
+            FakeSpan(
+                span_name="oteldemo.PaymentService/Charge",
+                service_name="payment",
+                attributes={
+                    ATTR_PRINCIPAL_ID: "user-123",
+                    ATTR_PRINCIPAL_SCOPES: "payments:charge",
+                    ATTR_DELEGATION_FROM: "user-123",
+                    ATTR_DELEGATION_SCOPES: "payments:charge",
+                },
+            )
+        ]
+        context = extract_authorization_context(spans)
+        scenario = context.to_scenario(policy=default_otel_demo_policy())
+
+        assert scenario.delegation_chain == []
+        result = ConfusedDeputyDetector().analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.finding_type == FindingType.NONE
+        assert "Delegation relationship evidence is incomplete" in result.reason
 
 
 class TestDelegatedScopes:
@@ -1133,8 +1157,8 @@ class TestContextToScenario:
             "orders:read"
         }
 
-    def test_confused_deputy_detected(self):
-        """Reproduce the golden confused-deputy scenario via extraction."""
+    def test_missing_service_identity_mapping_is_insufficient(self):
+        """A recipient ID is not implicitly equated with the operation service."""
         spans = _complete_span_set()
         ctx = extract_authorization_context(
             spans,
@@ -1145,7 +1169,8 @@ class TestContextToScenario:
 
         detector = ConfusedDeputyDetector(policy=policy)
         result = detector.analyze(scenario)
-        assert result.verdict == Verdict.DETECTED
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert "Cannot verify" in result.reason
 
     def test_legitimate_authorization_not_detected(self):
         """User has the required authority — should NOT detect."""
@@ -1497,7 +1522,7 @@ class TestDelegationScopeEvidence:
 
         result = ConfusedDeputyDetector().analyze(scenario)
         assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
-        assert "service's authority is not configured" in result.reason
+        assert "Cannot verify" in result.reason
 
 
 # ===================================================================
