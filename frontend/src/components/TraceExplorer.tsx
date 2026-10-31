@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import type { AnalysisPanelState, SpanRecord, TraceSummary } from '../types.ts';
-import type { AiExplanationLoader } from '../services/aiExplanation.ts';
+import type { AnalysisPanelState, SpanRecord, TraceGraphResponse, TraceSummary } from '../types.ts';
+import { shouldRequestExplanation, type AiExplanationLoader } from '../services/aiExplanation.ts';
 import { getInitialApiBaseUrl } from '../api.ts';
 import { createInvestigationApi, type InvestigationDataSource } from '../services/investigationApi.ts';
 import { computeTraceMetrics, formatDuration } from '../utils/spanHelpers.ts';
@@ -10,7 +10,14 @@ import { SpanTree } from './SpanTree.tsx';
 import { SpanDetail } from './SpanDetail.tsx';
 import { SecurityAnalysisPanel } from './SecurityAnalysisPanel.tsx';
 import { AiExplanationPanel } from './AiExplanationPanel.tsx';
+import { AuthorizationGraphPanel } from './AuthorizationGraphPanel.tsx';
 import { CaseInvestigation } from './CaseInvestigation.tsx';
+
+type AuthorizationGraphState =
+  | { kind: 'loading' }
+  | { kind: 'empty'; message: string }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; graph: TraceGraphResponse };
 
 export const TraceExplorer: React.FC = () => {
   // Configuration
@@ -49,6 +56,9 @@ export const TraceExplorer: React.FC = () => {
 
   // Security analysis state
   const [analysisState, setAnalysisState] = useState<AnalysisPanelState>({ kind: 'loading' });
+  const [authorizationGraphState, setAuthorizationGraphState] = useState<AuthorizationGraphState>({
+    kind: 'loading',
+  });
 
   // View mode: trace explorer, recent activity, or the guided case walkthrough.
   const [viewMode, setViewMode] = useState<'by-trace' | 'recent-spans' | 'case-demo'>('by-trace');
@@ -73,26 +83,34 @@ export const TraceExplorer: React.FC = () => {
   useEffect(() => {
     if (!selectedTraceId) {
       setAnalysisState({ kind: 'empty', message: 'Select a trace to review its security analysis.' });
+      setAuthorizationGraphState({ kind: 'empty', message: 'Select a trace to load its authorization graph.' });
       return;
     }
     let cancelled = false;
     setAnalysisState({ kind: 'loading' });
+    setAuthorizationGraphState({ kind: 'loading' });
     apiClient
-      .analysis(selectedTraceId)
+      .graph(selectedTraceId)
       .then((res) => {
         if (cancelled) return;
-        if (!res || !res.security_analysis) {
+        if (!res) {
           setAnalysisState({ kind: 'empty' });
+          setAuthorizationGraphState({ kind: 'empty', message: 'No graph response was returned for this trace.' });
         } else {
-          setAnalysisState({ kind: 'ready', analysis: res.security_analysis });
+          setAuthorizationGraphState({ kind: 'ready', graph: res });
+          setAnalysisState(res.security_analysis
+            ? { kind: 'ready', analysis: res.security_analysis }
+            : { kind: 'empty' });
         }
       })
       .catch((err) => {
         if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
         setAnalysisState({
           kind: 'error',
-          message: err instanceof Error ? err.message : String(err),
+          message,
         });
+        setAuthorizationGraphState({ kind: 'error', message });
       });
     return () => {
       cancelled = true;
@@ -636,7 +654,18 @@ export const TraceExplorer: React.FC = () => {
                           setDetailPanel('span');
                         }}
                       />
-                      {analysisState.kind === 'ready' && (
+                      <AuthorizationGraphPanel
+                        key={authorizationGraphState.kind === 'ready'
+                          ? authorizationGraphState.graph.trace_id
+                          : 'authorization-graph'}
+                        state={authorizationGraphState}
+                        dataSource={dataSource}
+                      />
+                      {analysisState.kind === 'ready' &&
+                        shouldRequestExplanation(
+                          analysisState.analysis.verdict,
+                          analysisState.analysis.finding.finding_id,
+                        ) && (
                         <AiExplanationPanel
                           findingId={analysisState.analysis.finding.finding_id}
                           loadExplanation={loadExplanation}

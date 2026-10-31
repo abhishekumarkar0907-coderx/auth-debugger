@@ -10,7 +10,7 @@ import {
   fetchTraces,
   fetchTraceSpans,
   fetchRecentSpans,
-  fetchTraceAnalysis,
+  fetchTraceGraph,
 } from '../src/api.ts';
 
 test('DEFAULT_API_BASE_URL defaults to empty string for same-origin relative requests', () => {
@@ -49,10 +49,10 @@ test('fetchTraceSpans validates traceId requirement', async () => {
   );
 });
 
-test('fetchTraceAnalysis validates traceId requirement', async () => {
+test('fetchTraceGraph validates traceId requirement', async () => {
   await assert.rejects(
     async () => {
-      await fetchTraceAnalysis('');
+      await fetchTraceGraph('');
     },
     {
       message: 'trace_id is required',
@@ -103,11 +103,11 @@ test('fetch functions use same-origin relative paths by default for Vite proxyin
       if (url === '/api/v1/spans?limit=50') {
         return new Response(JSON.stringify([]), { status: 200 });
       }
-      if (url === '/api/v1/traces/001122/analysis') {
+      if (url === '/api/v1/traces/001122/graph') {
         return new Response(
           JSON.stringify({
             trace_id: '001122',
-            nodes: [],
+            nodes: [{ id: 'service-1', type: 'service', label: 'api', metadata: {} }],
             edges: [],
             authority_amplification_hops: [],
             security_analysis: null,
@@ -141,10 +141,61 @@ test('fetch functions use same-origin relative paths by default for Vite proxyin
     assert.deepEqual(recent, []);
     assert.equal(calls[3].url, '/api/v1/spans?limit=50');
 
-    // Test trace analysis - default relative path
-    const analysis = await fetchTraceAnalysis('001122');
-    assert.equal(analysis.trace_id, '001122');
-    assert.equal(calls[4].url, '/api/v1/traces/001122/analysis');
+    // Test trace graph - default relative path
+    const graph = await fetchTraceGraph('001122');
+    assert.equal(graph.trace_id, '001122');
+    assert.equal(graph.nodes[0].label, 'api');
+    assert.equal(calls[4].url, '/api/v1/traces/001122/graph');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchTraceGraph rejects malformed successful responses', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      trace_id: '001122',
+      nodes: [{ id: 'node-a', type: 'service', label: 'api', metadata: {} }],
+      edges: [{ source: 'node-a', target: 'missing', type: 'calls', trace_id: '001122', metadata: {} }],
+      authority_amplification_hops: [],
+      security_analysis: null,
+    }), { status: 200 });
+
+    await assert.rejects(
+      fetchTraceGraph('001122'),
+      { name: 'ApiError', status: 200, statusText: 'ContractError' },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('malformed trace and span arrays are surfaced as contract errors', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return new Response(JSON.stringify(url === '/api/v1/traces'
+        ? [{ trace_id: 'trace-a', span_count: 'many', services: [] }]
+        : [{ trace_id: 'trace-a', span_id: 'span-a' }]), { status: 200 });
+    };
+
+    await assert.rejects(fetchTraces(), { name: 'ApiError', statusText: 'ContractError' });
+    await assert.rejects(fetchTraceSpans('trace-a'), { name: 'ApiError', statusText: 'ContractError' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('missing graph route is distinguished from a missing trace', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'Not Found' }), { status: 404 });
+    await assert.rejects(
+      fetchTraceGraph('trace-a'),
+      { message: 'The backend does not expose GET /api/v1/traces/{trace_id}/graph.' },
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

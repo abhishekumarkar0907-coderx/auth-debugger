@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   getExplanationFailureState,
   getExplanationUiState,
+  shouldRequestExplanation,
   type AiExplanationResponse,
 } from '../src/services/aiExplanation.ts';
 import { renderAiExplanationState } from '../src/utils/aiExplanationView.ts';
@@ -48,4 +49,11 @@ test('explanation failures distinguish timeout, provider unavailability, and oth
   assert.equal(getExplanationFailureState({ status: 503 }, false).kind, 'unavailable');
   assert.equal(getExplanationFailureState({ status: 504 }, false).kind, 'timeout');
   assert.equal(getExplanationFailureState(new Error('request failed'), false).kind, 'error');
+});
+
+test('explanations are requested only for a detected finding with an actual finding id', () => {
+  assert.equal(shouldRequestExplanation('DETECTED', 'finding-1'), true);
+  assert.equal(shouldRequestExplanation('NOT_DETECTED', 'finding-2'), false);
+  assert.equal(shouldRequestExplanation('INSUFFICIENT_EVIDENCE', null), false);
+  assert.equal(shouldRequestExplanation('DETECTED', null), false);
 });

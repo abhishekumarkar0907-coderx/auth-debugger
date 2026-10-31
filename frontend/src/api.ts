@@ -7,7 +7,12 @@
  * - GET  /api/v1/spans?limit=...
  */
 
-import type { SpanRecord, TraceSummary, TraceAnalysisEnvelope } from './types.ts';
+import {
+  adaptTraceGraphResponse,
+  type SpanRecord,
+  type TraceGraphResponse,
+  type TraceSummary,
+} from './types.ts';
 
 /**
  * Default API base URL for local development:
@@ -50,6 +55,55 @@ export class ApiError extends Error {
     this.statusText = statusText;
     this.details = details;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function isTraceSummary(value: unknown): value is TraceSummary {
+  return isRecord(value) &&
+    typeof value.trace_id === 'string' &&
+    typeof value.span_count === 'number' &&
+    Number.isFinite(value.span_count) &&
+    isStringArray(value.services);
+}
+
+function isSpanRecord(value: unknown): value is SpanRecord {
+  return isRecord(value) &&
+    typeof value.trace_id === 'string' &&
+    typeof value.span_id === 'string' &&
+    (value.parent_span_id === null || typeof value.parent_span_id === 'string') &&
+    (value.service_name === null || typeof value.service_name === 'string') &&
+    typeof value.span_name === 'string' &&
+    typeof value.start_time_unix_nano === 'number' &&
+    Number.isFinite(value.start_time_unix_nano) &&
+    typeof value.end_time_unix_nano === 'number' &&
+    Number.isFinite(value.end_time_unix_nano) &&
+    typeof value.duration_ms === 'number' &&
+    Number.isFinite(value.duration_ms) &&
+    typeof value.span_kind === 'number' &&
+    typeof value.status_code === 'number' &&
+    isRecord(value.attributes);
+}
+
+function validateArray<T>(
+  value: unknown,
+  predicate: (item: unknown) => item is T,
+  resource: string,
+): T[] {
+  if (!Array.isArray(value) || !value.every(predicate)) {
+    throw new ApiError(
+      `The backend returned a malformed ${resource} response.`,
+      200,
+      'ContractError',
+    );
+  }
+  return value;
 }
 
 async function request<T>(endpoint: string, baseUrl?: string): Promise<T> {
@@ -136,7 +190,11 @@ export async function fetchHealth(baseUrl?: string): Promise<{ status: string }>
  * List all available trace summaries: GET /api/v1/traces
  */
 export async function fetchTraces(baseUrl?: string): Promise<TraceSummary[]> {
-  return request<TraceSummary[]>('/api/v1/traces', baseUrl);
+  return validateArray(
+    await request<unknown>('/api/v1/traces', baseUrl),
+    isTraceSummary,
+    'trace list',
+  );
 }
 
 /**
@@ -146,22 +204,53 @@ export async function fetchTraceSpans(traceId: string, baseUrl?: string): Promis
   if (!traceId) {
     throw new Error('trace_id is required');
   }
-  return request<SpanRecord[]>(`/api/v1/traces/${encodeURIComponent(traceId)}`, baseUrl);
+  return validateArray(
+    await request<unknown>(`/api/v1/traces/${encodeURIComponent(traceId)}`, baseUrl),
+    isSpanRecord,
+    'trace spans',
+  );
 }
 
 /**
  * Get recent spans across all traces: GET /api/v1/spans?limit={limit}
  */
 export async function fetchRecentSpans(limit: number = 100, baseUrl?: string): Promise<SpanRecord[]> {
-  return request<SpanRecord[]>(`/api/v1/spans?limit=${encodeURIComponent(limit)}`, baseUrl);
+  return validateArray(
+    await request<unknown>(`/api/v1/spans?limit=${encodeURIComponent(limit)}`, baseUrl),
+    isSpanRecord,
+    'recent spans',
+  );
 }
 
 /**
- * Get deterministic security analysis for a specific trace: GET /api/v1/traces/{trace_id}/analysis
+ * Get authorization graph and deterministic analysis:
+ * GET /api/v1/traces/{trace_id}/graph
  */
-export async function fetchTraceAnalysis(traceId: string, baseUrl?: string): Promise<TraceAnalysisEnvelope> {
+export async function fetchTraceGraph(traceId: string, baseUrl?: string): Promise<TraceGraphResponse> {
   if (!traceId) {
     throw new Error('trace_id is required');
   }
-  return request<TraceAnalysisEnvelope>(`/api/v1/traces/${encodeURIComponent(traceId)}/analysis`, baseUrl);
+  try {
+    const response = await request<unknown>(
+      `/api/v1/traces/${encodeURIComponent(traceId)}/graph`,
+      baseUrl,
+    );
+    return adaptTraceGraphResponse(response);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      const detail = isRecord(error.details) ? error.details.detail : error.details;
+      const message = typeof detail === 'string' && detail.toLowerCase().includes('trace not found')
+        ? 'The selected trace was not found by the backend.'
+        : 'The backend does not expose GET /api/v1/traces/{trace_id}/graph.';
+      throw new ApiError(message, error.status, error.statusText, error.details);
+    }
+    if (error instanceof ApiError && error.status !== 200) throw error;
+    console.error(`[API Contract Error] Invalid graph response for trace ${traceId}:`, error);
+    throw new ApiError(
+      'The backend returned an unexpected trace graph response.',
+      200,
+      'ContractError',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }

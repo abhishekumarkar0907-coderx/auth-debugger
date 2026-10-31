@@ -82,7 +82,11 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({
   }
 
   const ready = analysisState?.kind === 'ready' ? analysisState.analysis : null;
-  const isConflicted = Boolean(ready && ready.verdict !== ready.finding.verdict);
+  const isConflicted = Boolean(
+    ready &&
+    ready.finding.verdict !== null &&
+    ready.verdict !== ready.finding.verdict
+  );
 
   const analysis = ready
     ? (() => {

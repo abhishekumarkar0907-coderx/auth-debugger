@@ -1,4 +1,4 @@
-import type { SpanRecord, TraceSummary, TraceAnalysisEnvelope } from '../types.ts';
+import type { SpanRecord, TraceSummary, TraceGraphResponse } from '../types.ts';
 
 /** Case walkthrough data is intentionally separate from the backend span schema. */
 export type CaseNodeKind = 'person' | 'service' | 'credential' | 'resource' | 'external';
@@ -204,7 +204,7 @@ export function demoSpansForTrace(traceId: string): SpanRecord[] {
   return index < 0 ? [] : DEMO_SPANS[index];
 }
 
-export function demoAnalysisForTrace(traceId: string): TraceAnalysisEnvelope | null {
+export function demoAnalysisForTrace(traceId: string): TraceGraphResponse | null {
   if (traceId === traceIds[0]) {
     return {
       trace_id: traceId,

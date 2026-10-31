@@ -1,3 +1,5 @@
+import type { DeterministicVerdict } from '../types/securityAnalysis.ts';
+
 export interface ExplanationClaim {
   text: string;
   evidence_refs: string[];
@@ -22,6 +24,13 @@ export interface AiExplanationResponse {
 
 /** Injected adapter, to be implemented only after Palak confirms the API contract. */
 export type AiExplanationLoader = (findingId: string, signal: AbortSignal) => Promise<AiExplanationResponse>;
+
+export function shouldRequestExplanation(
+  verdict: DeterministicVerdict,
+  findingId: string | null,
+): findingId is string {
+  return verdict === 'DETECTED' && findingId !== null && findingId.length > 0;
+}
 
 export type AiExplanationUiState =
   | { kind: 'idle' }
