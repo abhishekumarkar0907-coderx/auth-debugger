@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  getExplanationFailureState,
   getExplanationUiState,
   type AiExplanationResponse,
 } from '../src/services/aiExplanation.ts';
@@ -40,4 +41,11 @@ test('AI explanation payload remains optional and has no verdict or severity fie
   assert.equal('severity' in ready, false);
   assert.equal('classification' in ready, false);
   assert.equal(getExplanationUiState(ready).kind, 'ready');
+});
+
+test('explanation failures distinguish timeout, provider unavailability, and other errors', () => {
+  assert.equal(getExplanationFailureState(new Error('aborted'), true).kind, 'timeout');
+  assert.equal(getExplanationFailureState({ status: 503 }, false).kind, 'unavailable');
+  assert.equal(getExplanationFailureState({ status: 504 }, false).kind, 'timeout');
+  assert.equal(getExplanationFailureState(new Error('request failed'), false).kind, 'error');
 });

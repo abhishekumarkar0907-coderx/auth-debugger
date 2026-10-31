@@ -7,6 +7,7 @@ export interface SecurityAnalysis {
   hasDetectorVerdict: boolean;
   reason: string | null;
   findingId: string | null;
+  category: string | null;
   severity: string | null;
   principal: string | null;
   actor: string | null;
@@ -34,6 +35,7 @@ const FLAT_KEYS = {
   verdict: ['authorization.verdict', 'auth.verdict', 'security.verdict', 'finding.verdict', 'auth_engine.verdict'],
   reason: ['authorization.reason', 'auth.reason', 'security.reason', 'finding.reason'],
   findingId: ['authorization.finding_id', 'auth.finding_id', 'finding.id'],
+  category: ['authorization.category', 'auth.category', 'finding.category'],
   severity: ['authorization.severity', 'auth.severity', 'finding.severity'],
   principal: ['authorization.initiating_principal', 'authorization.principal', 'auth.principal', 'enduser.id', 'user.id', 'principal'],
   actor: ['authorization.actor', 'auth.actor', 'user.actor', 'actor'],
@@ -148,6 +150,7 @@ export function analyzeTraceMetadata(spans: SpanRecord[]): SecurityAnalysis {
       ? `Conflicting detector verdicts were attached to this trace: ${distinctVerdicts.join(', ')}.`
       : hasDetectorVerdict ? displayValue(firstValue(records, FLAT_KEYS.reason)) : null,
     findingId: displayValue(firstValue(records, FLAT_KEYS.findingId)),
+    category: displayValue(firstValue(records, FLAT_KEYS.category)),
     severity: displayValue(firstValue(records, FLAT_KEYS.severity)),
     principal: displayValue(firstValue(records, FLAT_KEYS.principal)),
     actor: displayValue(firstValue(records, FLAT_KEYS.actor)),

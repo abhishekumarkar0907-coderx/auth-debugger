@@ -626,19 +626,30 @@ export const TraceExplorer: React.FC = () => {
                   {detailPanel === 'span' ? (
                     <SpanDetail span={selectedSpan} onClose={() => setSelectedSpanId(null)} />
                   ) : (
-                    <>
+                    <div className="analysis-panel-stack">
                       <SecurityAnalysisPanel
                         traceId={analysisTraceId}
                         spans={analysisSpans}
                         analysisState={analysisState}
+                        onSelectSpan={(spanId) => {
+                          setSelectedSpanId(spanId);
+                          setDetailPanel('span');
+                        }}
                       />
                       {analysisState.kind === 'ready' && (
                         <AiExplanationPanel
                           findingId={analysisState.analysis.finding.finding_id}
                           loadExplanation={loadExplanation}
+                          dataSource={dataSource}
+                          evidence={analysisState.analysis.finding.evidence}
+                          spans={analysisSpans}
+                          onSelectSpan={(spanId) => {
+                            setSelectedSpanId(spanId);
+                            setDetailPanel('span');
+                          }}
                         />
                       )}
-                    </>
+                    </div>
                   )}
                 </div>
               </div>

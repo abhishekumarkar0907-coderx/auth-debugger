@@ -1,11 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import type { AnalysisPanelState, SpanRecord } from '../types.ts';
 import { analyzeTraceMetadata } from '../utils/securityAnalysis.ts';
+import { findEvidenceSpans } from '../utils/securityEvidence.ts';
 
 interface SecurityAnalysisPanelProps {
   traceId: string | null;
   spans: SpanRecord[];
   analysisState?: AnalysisPanelState;
+  onSelectSpan?: (spanId: string) => void;
 }
 
 const VERDICT_LABELS = {
@@ -26,7 +28,12 @@ const VALUE_ROWS = [
   ['Claims / scopes', 'claims'],
 ] as const;
 
-export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ traceId, spans, analysisState }) => {
+export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({
+  traceId,
+  spans,
+  analysisState,
+  onSelectSpan,
+}) => {
   const [showAllEvidence, setShowAllEvidence] = useState(false);
 
   if (analysisState?.kind === 'loading') {
@@ -77,8 +84,8 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ tr
   const ready = analysisState?.kind === 'ready' ? analysisState.analysis : null;
   const isConflicted = Boolean(ready && ready.verdict !== ready.finding.verdict);
 
-  const analysis = useMemo(() => {
-    if (ready) {
+  const analysis = ready
+    ? (() => {
       const f = ready.finding;
       const principal = f.initiating_principal
         ? `${f.initiating_principal.principal_type}:${f.initiating_principal.principal_id}${f.initiating_principal.service_name ? `@${f.initiating_principal.service_name}` : ''}`
@@ -88,6 +95,7 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ tr
         hasDetectorVerdict: true,
         reason: ready.reason || f.reason,
         findingId: f.finding_id,
+        category: f.category || null,
         severity: f.severity,
         principal,
         actor: null,
@@ -104,9 +112,8 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ tr
         attackPath: f.attack_path || [],
         evidence: Object.entries(f.evidence || {}).map(([key, value]) => ({ key, value })),
       };
-    }
-    return analyzeTraceMetadata(spans);
-  }, [ready, spans]);
+    })()
+    : analyzeTraceMetadata(spans);
 
   return (
     <section className="security-analysis" aria-labelledby="security-analysis-title">
@@ -133,6 +140,14 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ tr
               : 'No detector result is attached to these spans yet. The interface will not infer a vulnerability from trace data alone.')}
           </p>
         )}
+        {analysis.verdict === 'INSUFFICIENT_EVIDENCE' && (
+          <div className="insufficient-evidence-callout" role="note">
+            <span>Inconclusive analysis · Incomplete evidence</span>
+            <small>
+              The detector lacked sufficient authorization evidence to determine whether access was legitimate or vulnerable. An inconclusive result does not mean the trace is safe or that access was authorized.
+            </small>
+          </div>
+        )}
       </div>
 
       <div className="analysis-section">
@@ -141,6 +156,7 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ tr
           {analysis.severity && <span className="severity-label">{analysis.severity}</span>}
         </div>
         {analysis.findingId && <div className="finding-id"><span>Finding</span><code>{analysis.findingId}</code></div>}
+        {analysis.category && <div className="finding-id"><span>Category</span><strong>{analysis.category}</strong></div>}
         <dl className="analysis-facts">
           {VALUE_ROWS.map(([label, key]) => {
             const value = analysis[key];
@@ -176,12 +192,29 @@ export const SecurityAnalysisPanel: React.FC<SecurityAnalysisPanelProps> = ({ tr
         ) : (
           <>
             <dl className="evidence-list">
-              {(showAllEvidence ? analysis.evidence : analysis.evidence.slice(0, 6)).map(({ key, value }, index) => (
-                <div className="evidence-row" key={`${key}-${index}`}>
-                  <dt>{key}</dt>
-                  <dd>{typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value)}</dd>
-                </div>
-              ))}
+              {(showAllEvidence ? analysis.evidence : analysis.evidence.slice(0, 6)).map(({ key, value }, index) => {
+                const supportingSpans = findEvidenceSpans(value, spans, key);
+                return (
+                  <div className="evidence-row" key={`${key}-${index}`}>
+                    <dt>{key}</dt>
+                    <dd>
+                      <details className="evidence-value-details">
+                        <summary>View evidence value</summary>
+                        <pre>{typeof value === 'object' && value !== null ? JSON.stringify(value, null, 2) : String(value)}</pre>
+                      </details>
+                      {supportingSpans.length > 0 && (
+                        <div className="evidence-span-links" aria-label={`Supporting spans for ${key}`}>
+                          {supportingSpans.map((span) => (
+                            <button key={span.span_id} type="button" onClick={() => onSelectSpan?.(span.span_id)}>
+                              Open {span.service_name || span.span_name} · {span.span_id}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </dd>
+                  </div>
+                );
+              })}
             </dl>
             {analysis.evidence.length > 6 && (
               <button className="evidence-toggle" type="button" onClick={() => setShowAllEvidence((shown) => !shown)}>

@@ -29,6 +29,8 @@ export interface AuthorityView {
 
 export interface DeterministicFindingView {
   finding_id: string;
+  /** Optional detector-supplied category. The UI must not derive one. */
+  category?: string | null;
   verdict: DeterministicVerdict;
   trace_id: string | null;
   initiating_principal: PrincipalView | null;
@@ -71,7 +73,7 @@ export interface TraceAnalysisEnvelope {
   nodes: unknown[];
   edges: unknown[];
   authority_amplification_hops: unknown[];
-  security_analysis: DeterministicAnalysisView;
+  security_analysis: DeterministicAnalysisView | null;
 }
 
 /** Adapter mapping the backend response envelope to the frontend deterministic view model. */

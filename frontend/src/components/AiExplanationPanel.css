@@ -4,6 +4,7 @@
 .ai-source-verdict { padding: 5px 8px; border: 1px solid var(--border-subtle); border-radius: 999px; color: var(--text-secondary); font-size: 9px; white-space: nowrap; }
 .ai-explanation-panel p { color: var(--text-secondary); font-size: 11px; line-height: 1.6; }
 .ai-explanation-content { display: grid; gap: 12px; }
+.ai-demo-note { margin: 0; padding: 9px 10px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-card); color: var(--text-muted) !important; font-size: 9px !important; }
 .ai-claim { padding: 10px 0; border-top: 1px solid var(--border-subtle); }
 .ai-claim strong, .ai-explanation-content > div > strong { color: var(--text-primary); font-size: 11px; }
 .ai-claim p { margin: 5px 0; }

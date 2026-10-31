@@ -80,6 +80,7 @@ export const CaseInvestigation: React.FC = () => {
                 const active = edge.id === selectedRelationshipId;
                 const suspicious = !!edge.suspicious;
                 return <g key={edge.id} className={`network-edge ${suspicious ? 'suspicious' : ''} ${active ? 'active' : ''}`} role="button" tabIndex={0} aria-label={`${edge.label}: ${edge.evidence}`} onClick={() => { setSelectedRelationshipId(edge.id); setSelectedNodeId(null); }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { setSelectedRelationshipId(edge.id); setSelectedNodeId(null); } }}>
+                  <line className="network-edge-hit-area" x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
                   <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} markerEnd="url(#case-arrow)" />
                   <text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 2}>{edge.label}</text>
                 </g>;

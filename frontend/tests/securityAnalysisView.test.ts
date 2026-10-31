@@ -4,6 +4,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { renderSecurityAnalysisState } from '../src/components/securityAnalysisView.ts';
 import type { AnalysisPanelState, DeterministicAnalysisView } from '../src/types/securityAnalysis.ts';
+import { analyzeTraceMetadata } from '../src/utils/securityAnalysis.ts';
 
 const actualEngineShape: DeterministicAnalysisView = {
   verdict: 'DETECTED',
@@ -54,6 +55,18 @@ test('serialized deterministic engine result renders verdict, permissions, path,
 test('conflicting outer and finding verdicts are surfaced rather than silently chosen', () => {
   const conflicted = { ...actualEngineShape, verdict: 'NOT_DETECTED' as const };
   assert.match(render({ kind: 'ready', analysis: conflicted }), /conflicting deterministic verdicts/i);
+});
+
+test('optional finding category is read only from an explicit backend field', () => {
+  const span = {
+    trace_id: 'trace-a', span_id: 'span-a', parent_span_id: null,
+    service_name: 'service-a', span_name: 'operation-a',
+    start_time_unix_nano: 1, end_time_unix_nano: 2, duration_ms: 0.001,
+    span_kind: 1, status_code: 0,
+    attributes: { 'finding.category': 'CONFUSED_DEPUTY', 'finding.verdict': 'DETECTED' },
+  };
+  assert.equal(analyzeTraceMetadata([span]).category, 'CONFUSED_DEPUTY');
+  assert.equal(analyzeTraceMetadata([{ ...span, attributes: { 'finding.verdict': 'DETECTED' } }]).category, null);
 });
 
 test('serialized engine result with INSUFFICIENT_EVIDENCE renders safely without null errors', () => {

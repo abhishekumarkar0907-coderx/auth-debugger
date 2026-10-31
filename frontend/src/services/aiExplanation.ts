@@ -41,3 +41,17 @@ export function getExplanationUiState(
   }
   return { kind: 'unavailable', message: response.message || 'AI explanations are currently unavailable.' };
 }
+
+export function getExplanationFailureState(error: unknown, timedOut: boolean): AiExplanationUiState {
+  const status = (error as { status?: number | string } | null)?.status;
+  if (timedOut || status === 504 || status === 'timeout') {
+    return { kind: 'timeout', message: 'The AI provider timed out. The deterministic finding is unchanged.' };
+  }
+  if (status === 503 || status === 'unavailable') {
+    return { kind: 'unavailable', message: 'The AI provider is not configured or is temporarily unavailable.' };
+  }
+  return {
+    kind: 'error',
+    message: error instanceof Error ? error.message : 'Could not load the explanation.',
+  };
+}

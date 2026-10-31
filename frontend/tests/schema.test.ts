@@ -182,3 +182,14 @@ test('TraceAnalysisEnvelope correctly processes INSUFFICIENT_EVIDENCE response',
   assert.deepEqual(adapted?.finding.evidence, {});
   assert.equal(adapted?.finding.severity, 'UNSCORED');
 });
+
+test('trace-analysis envelope accepts a nullable finding and adapts it to no result', () => {
+  const envelope: TraceAnalysisEnvelope = {
+    trace_id: 'trace-without-analysis',
+    nodes: [],
+    edges: [],
+    authority_amplification_hops: [],
+    security_analysis: null,
+  };
+  assert.equal(adaptTraceAnalysisResponse(envelope), null);
+});
