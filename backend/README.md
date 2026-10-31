@@ -18,9 +18,16 @@ Normalized spans
 API response
 ```
 
-For this milestone the normalized spans are stored in a bounded in-memory
-store. PostgreSQL will replace this store after the OTLP integration is
-verified.
+For this milestone the normalized spans are stored in a bounded, process-local
+in-memory store (up to 5,000 spans). Data is lost when the backend restarts and
+is not shared between worker processes. This milestone intentionally does not
+add persistence: the smallest follow-up for single-instance retention is a
+SQLite-backed implementation behind the existing store interface and a
+persistent data volume. Multi-instance retention would require a shared store
+such as PostgreSQL.
+
+The backend API currently has no authentication. Do not expose it directly to
+untrusted networks.
 
 ## Local setup
 
@@ -66,12 +73,38 @@ $env:PYTHONPATH = "..\auth-engine"
 python -m pytest
 ```
 
+## Instrumented OTLP smoke test
+
+The backend tests construct synthetic OTLP protobuf requests directly. To
+verify an instrumented application/exporter over HTTP as well, start the
+backend and run the following from the repository root in a separate Python
+environment. The extra OpenTelemetry SDK/exporter packages are for this smoke
+client only; they are not backend runtime dependencies.
+
+```powershell
+python -m venv .venv-otel-smoke
+.\.venv-otel-smoke\Scripts\Activate.ps1
+python -m pip install opentelemetry-sdk==1.37.0 opentelemetry-exporter-otlp-proto-http==1.37.0
+python backend\scripts\instrumented_otlp_smoke.py
+```
+
+The client creates nested checkout/payment spans with the OpenTelemetry SDK,
+exports them as OTLP/HTTP protobuf to `http://127.0.0.1:8000/v1/traces`, then
+checks span retrieval, parent/trace identity, graph generation, the
+deterministic unauthorized-delegation finding, and frontend-facing response
+fields. This is synthetic application telemetry, not telemetry from a
+production or independently instrumented application.
+
 ## OTLP endpoint
 
 ```text
 POST /v1/traces
 Content-Type: application/x-protobuf
 ```
+
+The endpoint accepts OTLP/HTTP protobuf only; OTLP JSON and other content types
+are rejected with HTTP 415. Empty bodies and malformed protobuf/span identity
+data are rejected without storing any spans.
 
 ## Current API
 

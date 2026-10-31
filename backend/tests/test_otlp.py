@@ -8,13 +8,26 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
 )
 import pytest
 
-from app.main import analysis_results, app, store
+from app.main import _analysis_signatures, analysis_results, app, store
 from app.schemas import SpanRecord
+from app.security_engine import analyze_security_trace
 from app.store import InMemorySpanStore
 
 
 client = TestClient(app)
 
+
+@pytest.fixture(autouse=True)
+def clear_backend_state(monkeypatch: pytest.MonkeyPatch):
+    store._spans.clear()
+    analysis_results.clear()
+    _analysis_signatures.clear()
+    monkeypatch.delenv("AUTH_DEBUGGER_SERVICE_AUTHORITIES", raising=False)
+    monkeypatch.delenv("AUTH_DEBUGGER_DELEGATION_GRANTS", raising=False)
+    yield
+    store._spans.clear()
+    analysis_results.clear()
+    _analysis_signatures.clear()
 
 
 def make_payload(
@@ -160,6 +173,68 @@ def test_otlp_ingestion() -> None:
     assert record["duration_ms"] == 25.0
 
 
+def test_otlp_ingestion_reaches_graph_and_analysis_apis() -> None:
+    store._spans.clear()
+    analysis_results.clear()
+    trace_id = "00112233445566778899aabbccddeeff"
+
+    ingest_response = client.post(
+        "/v1/traces",
+        content=make_delegation_payload("POST /checkout"),
+        headers={"content-type": "application/x-protobuf"},
+    )
+
+    assert ingest_response.status_code == 200
+    assert ingest_response.json() == {
+        "accepted": True,
+        "resource_spans": 2,
+        "spans": 2,
+    }
+
+    spans_response = client.get(f"/api/v1/traces/{trace_id}")
+    assert spans_response.status_code == 200
+    spans = spans_response.json()
+    assert {span["trace_id"] for span in spans} == {trace_id}
+    assert {span["span_id"] for span in spans} == {
+        "0011223344556677",
+        "8899aabbccddeeff",
+    }
+    assert next(
+        span for span in spans if span["span_id"] == "8899aabbccddeeff"
+    )["parent_span_id"] == "0011223344556677"
+
+    graph_response = client.get(f"/api/v1/traces/{trace_id}/graph")
+    assert graph_response.status_code == 200
+    graph = graph_response.json()
+    assert graph["trace_id"] == trace_id
+    assert graph["security_analysis"]["verdict"] == "DETECTED"
+    assert graph["security_analysis"]["finding"]["finding_type"] == (
+        "UNAUTHORIZED_DELEGATION"
+    )
+
+    analysis_response = client.get(f"/api/v1/analysis/{trace_id}")
+    assert analysis_response.status_code == 200
+    analysis = analysis_response.json()
+    assert analysis["trace_id"] == trace_id
+    assert analysis["verdict"] == "DETECTED"
+    assert analysis["finding"]["finding_type"] == "UNAUTHORIZED_DELEGATION"
+    assert analysis["findings"][0]["finding_type"] == "UNAUTHORIZED_DELEGATION"
+    detector_result = analyze_security_trace(
+        [SpanRecord.model_validate(span) for span in spans]
+    )
+    assert analysis["finding"]["finding_id"] == (
+        detector_result["finding"]["finding_id"]
+    )
+
+    post_analysis_response = client.post(f"/api/v1/analysis/{trace_id}")
+    assert post_analysis_response.status_code == 200
+    assert post_analysis_response.json()["verdict"] == "DETECTED"
+    assert (
+        post_analysis_response.json()["finding"]["finding_type"]
+        == "UNAUTHORIZED_DELEGATION"
+    )
+
+
 def test_trace_graph_endpoint() -> None:
     store._spans.clear()
 
@@ -215,14 +290,91 @@ def test_empty_otlp_payload_returns_400() -> None:
 
 
 def test_unsupported_content_type_returns_415() -> None:
+    store._spans.clear()
     response = client.post(
         "/v1/traces",
-        content=b"some payload",
+        content=b'{"resourceSpans":[]}',
         headers={"content-type": "application/json"},
     )
 
     assert response.status_code == 415
     assert "OTLP protobuf" in response.json()["detail"]
+    assert store.count() == 0
+
+
+def test_empty_otlp_export_is_accepted_without_storing_spans() -> None:
+    store._spans.clear()
+    request = ExportTraceServiceRequest()
+    request.resource_spans.add()
+
+    response = client.post(
+        "/v1/traces",
+        content=request.SerializeToString(),
+        headers={"content-type": "application/x-protobuf"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "accepted": True,
+        "resource_spans": 1,
+        "spans": 0,
+    }
+    assert store.count() == 0
+    assert client.get("/api/v1/traces").json() == []
+
+
+def test_incomplete_authorization_telemetry_returns_insufficient_evidence() -> None:
+    store._spans.clear()
+    analysis_results.clear()
+    request = ExportTraceServiceRequest()
+    request.ParseFromString(make_payload())
+    request.resource_spans[0].scope_spans[0].spans[0].attributes.clear()
+    trace_id = "00112233445566778899aabbccddeeff"
+
+    ingest_response = client.post(
+        "/v1/traces",
+        content=request.SerializeToString(),
+        headers={"content-type": "application/x-protobuf"},
+    )
+    assert ingest_response.status_code == 200
+    assert ingest_response.json()["spans"] == 1
+
+    analysis_response = client.get(f"/api/v1/analysis/{trace_id}")
+    assert analysis_response.status_code == 200
+    assert analysis_response.json()["verdict"] == "INSUFFICIENT_EVIDENCE"
+    assert analysis_response.json()["findings"] == []
+
+
+def test_span_with_missing_parent_is_preserved_and_analyzable() -> None:
+    store._spans.clear()
+    analysis_results.clear()
+    trace_id = "00112233445566778899aabbccddeeff"
+    missing_parent_id = bytes.fromhex("8899aabbccddeeff")
+
+    ingest_response = client.post(
+        "/v1/traces",
+        content=make_payload(parent_span_id=missing_parent_id),
+        headers={"content-type": "application/x-protobuf"},
+    )
+
+    assert ingest_response.status_code == 200
+    spans_response = client.get(f"/api/v1/traces/{trace_id}")
+    assert spans_response.status_code == 200
+    assert spans_response.json()[0]["parent_span_id"] == (
+        missing_parent_id.hex()
+    )
+
+    graph_response = client.get(f"/api/v1/traces/{trace_id}/graph")
+    assert graph_response.status_code == 200
+    assert graph_response.json()["trace_id"] == trace_id
+    assert graph_response.json()["security_analysis"]["verdict"] in {
+        "INSUFFICIENT_EVIDENCE",
+        "NOT_DETECTED",
+    }
+
+    analysis_response = client.get(f"/api/v1/analysis/{trace_id}")
+    assert analysis_response.status_code == 200
+    assert analysis_response.json()["trace_id"] == trace_id
 
 
 def test_malformed_protobuf_returns_sanitized_400() -> None:
@@ -281,6 +433,26 @@ def test_invalid_parent_span_id_returns_sanitized_400(
     assert store.count() == 0
 
 
+def test_invalid_span_does_not_partially_store_valid_spans() -> None:
+    store._spans.clear()
+    request = ExportTraceServiceRequest()
+    request.ParseFromString(make_payload())
+    spans = request.resource_spans[0].scope_spans[0].spans
+    invalid_span = spans.add()
+    invalid_span.CopyFrom(spans[0])
+    invalid_span.span_id = b"\x00" * 8
+
+    response = client.post(
+        "/v1/traces",
+        content=request.SerializeToString(),
+        headers={"content-type": "application/x-protobuf"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid OTLP trace payload."}
+    assert store.count() == 0
+
+
 def test_reversed_timestamps_return_sanitized_400() -> None:
     store._spans.clear()
     response = client.post(
@@ -334,6 +506,39 @@ def test_normalization_failure_returns_generic_500_without_storing(
     assert "internal normalization detail" not in response.text
     assert "Unexpected failure while normalizing OTLP traces" in caplog.text
     assert store.count() == 0
+
+
+def test_analysis_failure_is_sanitized_and_does_not_block_later_requests(
+    monkeypatch,
+) -> None:
+    from app import main
+
+    store._spans.clear()
+    analysis_results.clear()
+    trace_id = "00112233445566778899aabbccddeeff"
+    ingest_response = client.post(
+        "/v1/traces",
+        content=make_delegation_payload("POST /checkout"),
+        headers={"content-type": "application/x-protobuf"},
+    )
+    assert ingest_response.status_code == 200
+
+    def fail_analysis(*args, **kwargs):
+        raise RuntimeError("internal analysis detail")
+
+    monkeypatch.setattr(main, "analyze_security_trace", fail_analysis)
+    failed_response = client.get(f"/api/v1/analysis/{trace_id}")
+
+    assert failed_response.status_code == 500
+    assert failed_response.json() == {
+        "detail": "Analysis could not be completed."
+    }
+    assert "internal analysis detail" not in failed_response.text
+
+    monkeypatch.undo()
+    recovered_response = client.get(f"/api/v1/analysis/{trace_id}")
+    assert recovered_response.status_code == 200
+    assert recovered_response.json()["verdict"] == "DETECTED"
 
 
 def test_unknown_trace_returns_404() -> None:
