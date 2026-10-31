@@ -53,9 +53,32 @@ export interface SecurityAnalysis {
   };
 }
 
+export interface AuthorizationGraphNode {
+  id: string;
+  type: string;
+  label: string;
+  authority?: string[] | null;
+  service?: string | null;
+  required_authority?: string[] | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AuthorizationGraphEdge {
+  source: string;
+  target: string;
+  type: string;
+  delegated_authority?: string[] | null;
+  service_authority?: string[] | null;
+  credential_type?: string | null;
+  explicit?: boolean;
+}
+
 export interface TraceGraphResponse {
+  trace_id: string;
+  nodes: AuthorizationGraphNode[];
+  edges: AuthorizationGraphEdge[];
+  authority_amplification_hops: unknown[];
   security_analysis?: SecurityAnalysis | null;
-  [key: string]: unknown;
 }
 
 /**

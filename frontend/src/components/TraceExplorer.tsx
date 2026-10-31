@@ -1,5 +1,10 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import type { SecurityAnalysis, SpanRecord, TraceSummary } from '../types.ts';
+import type {
+  SecurityAnalysis,
+  SpanRecord,
+  TraceGraphResponse,
+  TraceSummary,
+} from '../types.ts';
 import {
   fetchHealth,
   fetchTraces,
@@ -13,6 +18,7 @@ import { COPY, resolveWorkspaceMainState } from '../utils/stateHelpers.ts';
 import { TraceList } from './TraceList.tsx';
 import { SpanTree } from './SpanTree.tsx';
 import { SpanDetail } from './SpanDetail.tsx';
+import { AuthorizationGraphPanel } from './AuthorizationGraphPanel.tsx';
 import { SecurityAnalysisPanel } from './SecurityAnalysisPanel.tsx';
 
 export const TraceExplorer: React.FC = () => {
@@ -37,6 +43,7 @@ export const TraceExplorer: React.FC = () => {
   const [spansError, setSpansError] = useState<string | null>(null);
   const [securityAnalysis, setSecurityAnalysis] = useState<SecurityAnalysis | null>(null);
   const [securityAnalysisError, setSecurityAnalysisError] = useState<string | null>(null);
+  const [traceGraph, setTraceGraph] = useState<TraceGraphResponse | null>(null);
 
   // Selected span for detailed inspection
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
@@ -101,6 +108,7 @@ export const TraceExplorer: React.FC = () => {
     setSpansError(null);
     setSecurityAnalysis(null);
     setSecurityAnalysisError(null);
+    setTraceGraph(null);
     try {
       const data = await fetchTraceSpans(traceId, url);
       setSpans(data);
@@ -113,6 +121,7 @@ export const TraceExplorer: React.FC = () => {
       }
       try {
         const graph = await fetchTraceGraph(traceId, url);
+        setTraceGraph(graph);
         setSecurityAnalysis(graph.security_analysis ?? null);
       } catch (err) {
         setSecurityAnalysisError(err instanceof Error ? err.message : String(err));
@@ -121,6 +130,7 @@ export const TraceExplorer: React.FC = () => {
       setSpansError(err instanceof Error ? err.message : String(err));
       setSpans([]);
       setSelectedSpanId(null);
+      setTraceGraph(null);
       setSecurityAnalysis(null);
     } finally {
       setIsLoadingSpans(false);
@@ -134,6 +144,7 @@ export const TraceExplorer: React.FC = () => {
     try {
       const data = await fetchRecentSpans(100, url);
       setSpans(data);
+      setTraceGraph(null);
       setSecurityAnalysis(null);
       setSecurityAnalysisError(null);
       if (data.length > 0) {
@@ -144,6 +155,7 @@ export const TraceExplorer: React.FC = () => {
     } catch (err) {
       setSpansError(err instanceof Error ? err.message : String(err));
       setSpans([]);
+      setTraceGraph(null);
       setSelectedSpanId(null);
     } finally {
       setIsLoadingSpans(false);
@@ -483,6 +495,13 @@ export const TraceExplorer: React.FC = () => {
               {selectedTraceId && viewMode === 'by-trace' && (
                 <SecurityAnalysisPanel
                   analysis={securityAnalysis}
+                  error={securityAnalysisError}
+                />
+              )}
+
+              {selectedTraceId && viewMode === 'by-trace' && (
+                <AuthorizationGraphPanel
+                  graph={traceGraph}
                   error={securityAnalysisError}
                 />
               )}
