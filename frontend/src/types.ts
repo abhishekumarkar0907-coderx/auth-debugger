@@ -27,60 +27,6 @@ export interface SpanRecord {
   attributes: Record<string, unknown>;
 }
 
-export interface SecurityEvidenceWarning {
-  field: string;
-  warning_type: string;
-  message: string;
-  sources?: string[];
-}
-
-export interface SecurityFinding {
-  finding_type?: string;
-  reason?: string;
-  effective_action?: string | null;
-  attack_path?: string[];
-  [key: string]: unknown;
-}
-
-export interface SecurityAnalysis {
-  verdict: string;
-  reason?: string;
-  finding?: SecurityFinding | null;
-  details?: Record<string, unknown> | null;
-  context?: {
-    warnings?: SecurityEvidenceWarning[];
-    [key: string]: unknown;
-  };
-}
-
-export interface AuthorizationGraphNode {
-  id: string;
-  type: string;
-  label: string;
-  authority?: string[] | null;
-  service?: string | null;
-  required_authority?: string[] | null;
-  metadata?: Record<string, unknown>;
-}
-
-export interface AuthorizationGraphEdge {
-  source: string;
-  target: string;
-  type: string;
-  delegated_authority?: string[] | null;
-  service_authority?: string[] | null;
-  credential_type?: string | null;
-  explicit?: boolean;
-}
-
-export interface TraceGraphResponse {
-  trace_id: string;
-  nodes: AuthorizationGraphNode[];
-  edges: AuthorizationGraphEdge[];
-  authority_amplification_hops: unknown[];
-  security_analysis?: SecurityAnalysis | null;
-}
-
 /**
  * OpenTelemetry SpanKind standard numerical codes:
  * 0 = SPAN_KIND_UNSPECIFIED
@@ -154,3 +100,5 @@ export interface TraceMetrics {
   earliestStartNs: number;
   latestEndNs: number;
 }
+
+export * from './types/securityAnalysis.ts';

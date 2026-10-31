@@ -1,218 +1,163 @@
-import React, { useMemo } from 'react';
-import type {
-  AuthorizationGraphEdge,
-  AuthorizationGraphNode,
-  TraceGraphResponse,
-} from '../types.ts';
+import React, { useMemo, useState } from 'react';
+import type { InvestigationDataSource } from '../services/investigationApi.ts';
+import type { AuthorizationGraphEdge, AuthorizationGraphNode } from '../types.ts';
+import './AuthorizationGraphPanel.css';
+
+type GraphState =
+  | { kind: 'loading' }
+  | { kind: 'empty'; message: string }
+  | { kind: 'error'; message: string }
+  | {
+    kind: 'ready';
+    graph: {
+      trace_id: string;
+      nodes: AuthorizationGraphNode[];
+      edges: AuthorizationGraphEdge[];
+    };
+  };
 
 interface AuthorizationGraphPanelProps {
-  graph: TraceGraphResponse | null;
-  error: string | null;
+  state: GraphState;
+  dataSource: InvestigationDataSource;
 }
 
-const NODE_WIDTH = 160;
-const NODE_HEIGHT = 76;
-const COLUMN_GAP = 178;
-const ROW_GAP = 112;
-const PADDING = 24;
+type Selection =
+  | { kind: 'node'; id: string }
+  | { kind: 'edge'; key: string }
+  | null;
 
-function nodeAuthority(node: AuthorizationGraphNode): string {
-  const permissions = node.authority ?? node.required_authority ?? [];
-  return permissions.length > 0 ? permissions.join(', ') : node.service ?? '';
+function edgeKey(edge: AuthorizationGraphEdge, index: number): string {
+  return `${edge.source}:${edge.target}:${edge.type}:${index}`;
 }
 
-function edgeAuthority(edge: AuthorizationGraphEdge): string {
-  const permissions = edge.delegated_authority ?? edge.service_authority ?? [];
-  return permissions.join(', ');
+function formatGraphValue(value: unknown): string {
+  return JSON.stringify(value, null, 2);
 }
 
 export const AuthorizationGraphPanel: React.FC<AuthorizationGraphPanelProps> = ({
-  graph,
-  error,
+  state,
+  dataSource,
 }) => {
-  const layout = useMemo(() => {
-    if (!graph) return null;
+  const [selection, setSelection] = useState<Selection>(null);
+  const positions = useMemo(() => {
+    if (state.kind !== 'ready') return new Map<string, { x: number; y: number }>();
+    const count = state.graph.nodes.length;
+    return new Map(state.graph.nodes.map((node, index) => [
+      node.id,
+      {
+        x: count < 2 ? 50 : 8 + (index * 84) / (count - 1),
+        y: index % 2 === 0 ? 34 : 66,
+      },
+    ]));
+  }, [state]);
 
-    const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
-    const layers = new Map(graph.nodes.map((node) => [node.id, 0]));
-    const indegree = new Map(graph.nodes.map((node) => [node.id, 0]));
-    const outgoing = new Map<string, string[]>();
-
-    for (const edge of graph.edges) {
-      if (!nodeById.has(edge.source) || !nodeById.has(edge.target)) continue;
-      outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
-      indegree.set(edge.target, (indegree.get(edge.target) ?? 0) + 1);
-    }
-
-    const queue = graph.nodes
-      .filter((node) => indegree.get(node.id) === 0)
-      .map((node) => node.id);
-    const visited = new Set<string>();
-
-    while (queue.length > 0) {
-      const source = queue.shift()!;
-      visited.add(source);
-      for (const target of outgoing.get(source) ?? []) {
-        layers.set(target, Math.max(layers.get(target) ?? 0, (layers.get(source) ?? 0) + 1));
-        const remaining = (indegree.get(target) ?? 0) - 1;
-        indegree.set(target, remaining);
-        if (remaining === 0) queue.push(target);
-      }
-    }
-
-    if (visited.size < graph.nodes.length) {
-      const nextLayer = Math.max(0, ...layers.values()) + 1;
-      graph.nodes.forEach((node) => {
-        if (!visited.has(node.id)) layers.set(node.id, nextLayer);
-      });
-    }
-
-    const nodesByLayer = new Map<number, AuthorizationGraphNode[]>();
-    for (const node of graph.nodes) {
-      const layer = layers.get(node.id) ?? 0;
-      nodesByLayer.set(layer, [...(nodesByLayer.get(layer) ?? []), node]);
-    }
-
-    const positions = new Map<string, { x: number; y: number }>();
-    let maxRows = 1;
-    for (const [layer, nodes] of nodesByLayer) {
-      maxRows = Math.max(maxRows, nodes.length);
-      nodes.forEach((node, row) => {
-        positions.set(node.id, {
-          x: PADDING + layer * COLUMN_GAP,
-          y: PADDING + row * ROW_GAP,
-        });
-      });
-    }
-
-    const layerCount = Math.max(0, ...nodesByLayer.keys()) + 1;
-    return {
-      positions,
-      width: Math.max(560, PADDING * 2 + NODE_WIDTH + (layerCount - 1) * COLUMN_GAP),
-      height: PADDING * 2 + (maxRows - 1) * ROW_GAP + NODE_HEIGHT,
-    };
-  }, [graph]);
-
-  const nodes = graph?.nodes ?? [];
-  const edges = graph?.edges ?? [];
-  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  let selectedValue: { title: string; value: unknown } | null = null;
+  if (state.kind === 'ready' && selection?.kind === 'node') {
+    const node = state.graph.nodes.find((item) => item.id === selection.id);
+    if (node) selectedValue = { title: node.label, value: node };
+  } else if (state.kind === 'ready' && selection?.kind === 'edge') {
+    const index = state.graph.edges.findIndex((edge, i) => edgeKey(edge, i) === selection.key);
+    const edge = index >= 0 ? state.graph.edges[index] : undefined;
+    if (edge) selectedValue = { title: `${edge.type}: ${edge.source} → ${edge.target}`, value: edge };
+  }
 
   return (
     <section className="authorization-graph-panel" aria-labelledby="authorization-graph-title">
-      <div className="authorization-graph-heading">
+      <header className="authorization-graph-header">
         <div>
-          <span className="security-analysis-eyebrow">Trace relationships</span>
+          <p className="security-eyebrow">TRACE RELATIONSHIPS</p>
           <h3 id="authorization-graph-title">Authorization graph</h3>
+          {state.kind === 'ready' && <p className="authorization-graph-trace">{state.graph.trace_id}</p>}
         </div>
-        {graph && (
-          <span className="authorization-graph-count">
-            {nodes.length} nodes · {edges.length} links
-          </span>
-        )}
-      </div>
+        <span className={`graph-source-label ${dataSource}`}>
+          {dataSource === 'demo' ? 'Sample data' : 'Live API'}
+        </span>
+      </header>
 
-      {error ? (
-        <p className="security-analysis-unavailable">{error}</p>
-      ) : graph && nodes.length > 0 && layout ? (
+      {state.kind === 'loading' && <p role="status">Loading authorization graph…</p>}
+      {state.kind === 'empty' && <p>{state.message}</p>}
+      {state.kind === 'error' && <p role="alert">{state.message}</p>}
+      {state.kind === 'ready' && state.graph.nodes.length === 0 && state.graph.edges.length === 0 && (
+        <p>No authorization graph entities or relationships were returned for this trace.</p>
+      )}
+      {state.kind === 'ready' && (state.graph.nodes.length > 0 || state.graph.edges.length > 0) && (
         <>
+          <p className="authorization-graph-counts">
+            {state.graph.nodes.length} entities · {state.graph.edges.length} relationships
+          </p>
           <div className="authorization-graph-canvas">
             <svg
               className="authorization-graph-svg"
-              viewBox={`0 0 ${layout.width} ${layout.height}`}
-              role="img"
-              aria-label={`Authorization graph with ${nodes.length} nodes and ${edges.length} links`}
+              viewBox="0 0 100 100"
+              role="group"
+              aria-label={`Authorization graph for trace ${state.graph.trace_id}`}
             >
               <defs>
-                <marker
-                  id="authorization-graph-arrow"
-                  markerWidth="8"
-                  markerHeight="8"
-                  refX="7"
-                  refY="4"
-                  orient="auto"
-                >
-                  <path d="M0,0 L8,4 L0,8 z" className="authorization-graph-arrowhead" />
+                <marker id="authorization-graph-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="4" markerHeight="4" orient="auto">
+                  <path d="M0 0 L8 4 L0 8 z" />
                 </marker>
               </defs>
-              {edges.map((edge, index) => {
-                const source = layout.positions.get(edge.source);
-                const target = layout.positions.get(edge.target);
-                if (!source || !target) return null;
-                const startX = source.x + NODE_WIDTH;
-                const startY = source.y + NODE_HEIGHT / 2;
-                const endX = target.x;
-                const endY = target.y + NODE_HEIGHT / 2;
-                const controlX = (startX + endX) / 2;
+              {state.graph.edges.map((edge, index) => {
+                const from = positions.get(edge.source);
+                const to = positions.get(edge.target);
+                if (!from || !to) return null;
+                const key = edgeKey(edge, index);
+                const active = selection?.kind === 'edge' && selection.key === key;
                 return (
-                  <path
-                    key={`${edge.source}-${edge.target}-${index}`}
-                    d={`M ${startX} ${startY} C ${controlX} ${startY}, ${controlX} ${endY}, ${endX} ${endY}`}
-                    className={`authorization-graph-edge authorization-graph-edge-${edge.type}`}
-                    markerEnd="url(#authorization-graph-arrow)"
-                  />
+                  <g
+                    key={key}
+                    className={`authorization-graph-edge ${active ? 'active' : ''}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`${edge.type}: ${edge.source} to ${edge.target}`}
+                    onClick={() => setSelection({ kind: 'edge', key })}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setSelection({ kind: 'edge', key });
+                      }
+                    }}
+                  >
+                    <line className="authorization-graph-hit-area" x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
+                    <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} markerEnd="url(#authorization-graph-arrow)" />
+                    <text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 2}>{edge.type}</text>
+                  </g>
                 );
               })}
-              {nodes.map((node) => {
-                const position = layout.positions.get(node.id);
-                if (!position) return null;
-                const subtitle = nodeAuthority(node);
-                const label =
-                  node.label.length > 20 ? `${node.label.slice(0, 17)}…` : node.label;
+              {state.graph.nodes.map((node) => {
+                const point = positions.get(node.id);
+                if (!point) return null;
+                const active = selection?.kind === 'node' && selection.id === node.id;
                 return (
                   <g
                     key={node.id}
-                    className={`authorization-graph-node authorization-graph-node-${node.type}`}
-                    transform={`translate(${position.x} ${position.y})`}
+                    className={`authorization-graph-node ${active ? 'active' : ''}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`${node.label}, ${node.type}`}
+                    onClick={() => setSelection({ kind: 'node', id: node.id })}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setSelection({ kind: 'node', id: node.id });
+                      }
+                    }}
                   >
-                    <rect width={NODE_WIDTH} height={NODE_HEIGHT} rx="10" />
-                    <text x="12" y="22" className="authorization-graph-node-type">
-                      {node.type}
-                    </text>
-                    <text x="12" y="43" className="authorization-graph-node-label">
-                      {label}
-                    </text>
-                    {subtitle && (
-                      <text x="12" y="61" className="authorization-graph-node-subtitle">
-                        {subtitle.length > 22 ? `${subtitle.slice(0, 19)}…` : subtitle}
-                      </text>
-                    )}
+                    <title>{node.label} ({node.type})</title>
+                    <circle cx={point.x} cy={point.y} r="4.3" />
+                    <text x={point.x} y={point.y + 9}>{node.label}</text>
                   </g>
                 );
               })}
             </svg>
           </div>
-          {edges.length > 0 && (
-            <details className="authorization-graph-link-details">
-              <summary>Inspect graph links ({edges.length})</summary>
-              <ul className="authorization-graph-links" aria-label="Authorization graph links">
-                {edges.map((edge, index) => (
-                  <li key={`${edge.source}-${edge.target}-${index}`}>
-                    <strong>{nodeById.get(edge.source)?.label ?? edge.source}</strong>
-                    <span aria-hidden="true">→</span>
-                    <strong>{nodeById.get(edge.target)?.label ?? edge.target}</strong>
-                    <span className="authorization-graph-link-type">{edge.type}</span>
-                    {edge.credential_type && (
-                      <span className="authorization-graph-link-type">{edge.credential_type}</span>
-                    )}
-                    {edgeAuthority(edge) && (
-                      <span className="authorization-graph-link-authority">
-                        {edgeAuthority(edge)}
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
+          {selectedValue
+            ? <div className="authorization-graph-selection">
+              <h4>{selectedValue.title}</h4>
+              <pre>{formatGraphValue(selectedValue.value)}</pre>
+            </div>
+            : <p className="authorization-graph-hint">Select a node or relationship to inspect the backend response.</p>}
         </>
-      ) : graph ? (
-        <p className="security-analysis-unavailable">
-          This trace has no authorization graph nodes or links.
-        </p>
-      ) : (
-        <p className="security-analysis-unavailable">
-          Authorization graph is not available.
-        </p>
       )}
     </section>
   );

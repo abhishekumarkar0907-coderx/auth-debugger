@@ -557,8 +557,39 @@ class TestDuplicateIdsAndCycles:
             target_action="act:c",
         )
         # Should terminate safely and find the acyclic path
+        assert graph.edge_count == 4
         assert len(paths) == 1
         assert paths[0].path_nodes == ["user-c", "svc-b", "svc-c", "op:act"]
+
+    def test_direct_self_cycle_is_stored_and_traversal_terminates(self):
+        graph = AuthorizationGraph()
+        graph.add_node(PrincipalNode(node_id="user-self"))
+        graph.add_node(OperationNode(node_id="op:self", semantic_action="act:self"))
+        graph.add_edge(
+            DelegationEdge(
+                source_id="user-self",
+                target_id="user-self",
+                trace_id="trace-self",
+            )
+        )
+        graph.add_edge(
+            ExecutionEdge(
+                source_id="user-self",
+                target_id="op:self",
+                trace_id="trace-self",
+            )
+        )
+
+        paths = find_delegation_paths(
+            graph=graph,
+            initiating_principal_id="user-self",
+            target_action="act:self",
+            trace_id="trace-self",
+        )
+
+        assert graph.edge_count == 2
+        assert len(paths) == 1
+        assert paths[0].path_nodes == ["user-self", "op:self"]
 
 
 # ---------------------------------------------------------------------------
@@ -831,18 +862,15 @@ class TestGraphAdapter:
         assert graph.has_node("payment-svc")
         assert graph.trace_ids() == ["trace-rep-001"]
 
-        # Verify delegation path queries operate on the constructed graph
+        # The unlinked recipient ID must not be joined to the operation service.
         paths = find_delegation_paths(graph, "user-123", "payments:charge")
-        assert len(paths) == 1
-        assert paths[0].path_nodes[0] == "user-123"
-        assert "checkout-svc" in paths[0].path_nodes
-        assert "payment-svc" in paths[0].path_nodes
+        assert paths == []
+        assert graph.has_node("payment")
+        assert graph.get_outgoing_edges("payment-svc", trace_id="trace-rep-001") == []
 
-        # Verify amplification hop detection
+        # A service-name-only match cannot establish authority amplification.
         hops = find_authority_amplification_hops(graph, trace_id="trace-rep-001")
-        assert len(hops) == 1
-        assert hops[0].from_principal_id == "checkout-svc"
-        assert hops[0].to_service_id == "payment-svc"
+        assert hops == []
 
     def test_build_graph_populates_existing_graph(self):
         existing = AuthorizationGraph()

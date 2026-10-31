@@ -204,9 +204,19 @@ def test_graph_api_returns_insufficient_evidence_for_incomplete_delegation() -> 
 
     assert response.status_code == 200
     result = response.json()
-    assert result["security_analysis"]["verdict"] == "INSUFFICIENT_EVIDENCE"
-    assert "delegation metadata is incomplete" in result["security_analysis"]["reason"]
+    analysis = result["security_analysis"]
+    assert analysis["status"] == analysis["verdict"] == "INSUFFICIENT_EVIDENCE"
+    assert analysis["finding"]["verdict"] == analysis["verdict"]
+    assert analysis["finding"]["finding_type"] == "NONE"
+    assert "Delegation relationship evidence is incomplete" in (
+        analysis["reason"]
+    )
+    assert any(
+        warning["field"] == "delegation.to"
+        for warning in analysis["finding"]["evidence"]["extraction_warnings"]
+    )
     assert result["nodes"]
+    assert not any(edge["type"] == "delegation" for edge in result["edges"])
 
 
 def test_graph_api_does_not_infer_missing_service_authority() -> None:
@@ -322,3 +332,126 @@ def test_graph_api_returns_404_for_missing_trace() -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Trace not found"
+
+
+def test_explanation_api_returns_evidence_grounded_text_without_changing_finding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_span(
+        "trace-explanation",
+        scopes="orders:read",
+        attributes={
+            "authz.delegation.from": "user-1",
+            "authz.delegation.to": "payment",
+            "authz.delegation.scopes": ["payments:charge"],
+        },
+    )
+    monkeypatch.setenv(
+        "AUTH_DEBUGGER_SERVICE_AUTHORITIES",
+        json.dumps({"payment": ["payments:charge"]}),
+    )
+
+    async def fake_explanation(_finding):
+        return backend_main.ai_explanation.ModelExplanation.model_validate({
+            "summary": {
+                "text": "The deterministic finding records an authority expansion.",
+                "evidence_refs": ["finding.reason"],
+            },
+            "why_detected": {
+                "text": "The delegated request lacks the required scope.",
+                "evidence_refs": ["finding.reason"],
+            },
+            "authority_difference": {
+                "text": "The requested operation exceeds the delegated authority.",
+                "evidence_refs": ["finding.required_authority"],
+            },
+            "request_path_explanation": {
+                "text": "The trace includes the operation span.",
+                "evidence_refs": ["span.span-1"],
+            },
+            "limitations": [],
+            "remediation": [],
+        })
+
+    monkeypatch.setattr(
+        backend_main.ai_explanation,
+        "_request_model",
+        fake_explanation,
+    )
+    graph = client.get("/api/v1/traces/trace-explanation/graph").json()
+    finding_id = graph["security_analysis"]["finding"]["finding_id"]
+
+    response = client.get(
+        "/api/v1/traces/trace-explanation/explanation",
+        params={"finding_id": finding_id},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "ready"
+    assert result["finding_id"] == finding_id
+    assert result["explanation"]["summary"]["evidence_refs"] == ["finding.reason"]
+    assert "verdict" not in result
+    assert "severity" not in result
+    assert client.get("/api/v1/traces/trace-explanation/graph").json()[
+        "security_analysis"
+    ]["verdict"] == "DETECTED"
+
+
+def test_explanation_api_reports_missing_provider_without_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_span(
+        "trace-explanation-unavailable",
+        scopes="orders:read",
+        attributes={
+            "authz.delegation.from": "user-1",
+            "authz.delegation.to": "payment",
+            "authz.delegation.scopes": ["payments:charge"],
+        },
+    )
+    monkeypatch.setenv(
+        "AUTH_DEBUGGER_SERVICE_AUTHORITIES",
+        json.dumps({"payment": ["payments:charge"]}),
+    )
+    monkeypatch.delenv("AI_PROVIDER_API_KEY", raising=False)
+    graph = client.get(
+        "/api/v1/traces/trace-explanation-unavailable/graph"
+    ).json()
+    finding_id = graph["security_analysis"]["finding"]["finding_id"]
+
+    response = client.get(
+        "/api/v1/traces/trace-explanation-unavailable/explanation",
+        params={"finding_id": finding_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "unavailable"
+    assert "not configured" in response.json()["message"]
+    assert client.get(
+        "/api/v1/traces/trace-explanation-unavailable/graph"
+    ).json()["security_analysis"]["verdict"] == "DETECTED"
+
+
+def test_explanation_api_rejects_stale_finding_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_span(
+        "trace-explanation-stale",
+        scopes="orders:read",
+        attributes={
+            "authz.delegation.from": "user-1",
+            "authz.delegation.to": "payment",
+            "authz.delegation.scopes": ["payments:charge"],
+        },
+    )
+    monkeypatch.setenv(
+        "AUTH_DEBUGGER_SERVICE_AUTHORITIES",
+        json.dumps({"payment": ["payments:charge"]}),
+    )
+    response = client.get(
+        "/api/v1/traces/trace-explanation-stale/explanation",
+        params={"finding_id": "stale-finding"},
+    )
+
+    assert response.status_code == 409

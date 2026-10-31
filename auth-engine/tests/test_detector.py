@@ -223,6 +223,187 @@ class TestMissingInitiatingIdentity:
         assert result.finding.finding_type == FindingType.NONE
 
 
+class TestDelegationChainConnectivity:
+    def test_first_hop_must_start_at_initiating_principal(self):
+        scenario = golden_confused_deputy()
+        first_step = scenario.delegation_chain[0]
+        scenario.delegation_chain[0] = replace(
+            first_step,
+            from_principal=Identity("unrelated-user", PrincipalType.USER),
+        )
+
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.finding_type == FindingType.NONE
+        assert "disconnected at hop 1" in result.reason
+        assert "unrelated-user" in result.reason
+
+    def test_each_hop_must_continue_from_previous_recipient(self):
+        scenario = golden_confused_deputy()
+        scenario.delegation_chain = [
+            scenario.delegation_chain[0],
+            scenario.delegation_chain[2],
+        ]
+
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.finding_type == FindingType.NONE
+        assert "disconnected at hop 2" in result.reason
+        assert "checkout-svc" in result.reason
+
+
+class TestActingServiceIdentity:
+    def test_exact_recipient_identifier_matches_operation_service(self):
+        scenario = golden_confused_deputy()
+        final_step = scenario.delegation_chain[-1]
+        scenario.delegation_chain[-1] = replace(
+            final_step,
+            to_principal=Identity("payment", PrincipalType.SERVICE),
+        )
+
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.DETECTED
+
+    def test_final_recipient_must_match_operation_service(self):
+        scenario = golden_confused_deputy()
+        final_step = scenario.delegation_chain[-1]
+        scenario.delegation_chain[-1] = replace(
+            final_step,
+            to_principal=Identity(
+                "other-service",
+                PrincipalType.SERVICE,
+                service_name="other",
+            ),
+        )
+
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.finding_type == FindingType.NONE
+        assert "Cannot verify" in result.reason
+        assert "other-service" in result.reason
+        assert "payment" in result.reason
+
+    def test_service_identity_mapping_can_resolve_recipient_id(self):
+        scenario = golden_confused_deputy()
+        final_step = scenario.delegation_chain[-1]
+        scenario.delegation_chain[-1] = replace(
+            final_step,
+            to_principal=Identity("payment-svc", PrincipalType.SERVICE),
+        )
+        scenario.service_identities = [
+            Identity(
+                "payment-svc",
+                PrincipalType.SERVICE,
+                service_name="payment",
+            )
+        ]
+
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.DETECTED
+        assert result.finding.finding_type == FindingType.CONFUSED_DEPUTY
+
+    def test_missing_service_mapping_is_insufficient(self):
+        scenario = golden_confused_deputy()
+        final_step = scenario.delegation_chain[-1]
+        scenario.delegation_chain[-1] = replace(
+            final_step,
+            to_principal=Identity("payment-svc", PrincipalType.SERVICE),
+        )
+
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.finding_type == FindingType.NONE
+
+    def test_conflicting_service_identity_mappings_are_insufficient(self):
+        scenario = golden_confused_deputy()
+        final_step = scenario.delegation_chain[-1]
+        scenario.delegation_chain[-1] = replace(
+            final_step,
+            to_principal=Identity("payment-svc", PrincipalType.SERVICE),
+        )
+        scenario.service_identities = [
+            Identity("payment-svc", PrincipalType.SERVICE, "payment"),
+            Identity("payment-svc", PrincipalType.SERVICE, "other"),
+        ]
+
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.finding_type == FindingType.NONE
+
+    def test_distinct_service_claiming_same_name_is_ambiguous(self):
+        scenario = golden_confused_deputy()
+        final_step = scenario.delegation_chain[-1]
+        scenario.delegation_chain[-1] = replace(
+            final_step,
+            to_principal=Identity("payment-svc", PrincipalType.SERVICE),
+        )
+        scenario.service_identities = [
+            Identity("payment-svc", PrincipalType.SERVICE, "payment"),
+            Identity("payment-alias", PrincipalType.SERVICE, "payment"),
+        ]
+
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert result.finding.finding_type == FindingType.NONE
+
+    def test_malformed_identity_fields_do_not_establish_a_match(self):
+        for recipient in (
+            Identity("payment-svc", PrincipalType.SERVICE, " "),
+            Identity(" ", PrincipalType.SERVICE, "payment"),
+            Identity("payment", PrincipalType.AGENT),
+        ):
+            scenario = golden_confused_deputy()
+            final_step = scenario.delegation_chain[-1]
+            scenario.delegation_chain[-1] = replace(
+                final_step,
+                to_principal=recipient,
+            )
+
+            result = DETECTOR.analyze(scenario)
+
+            assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+            assert result.finding.finding_type == FindingType.NONE
+
+    def test_explicit_alias_mapping_matches_only_its_declared_name(self):
+        scenario = golden_confused_deputy()
+        final_step = scenario.delegation_chain[-1]
+        scenario.delegation_chain[-1] = replace(
+            final_step,
+            to_principal=Identity("payment-svc", PrincipalType.SERVICE),
+        )
+        scenario.service_identities = [
+            Identity(
+                "payment-svc",
+                PrincipalType.SERVICE,
+                service_name="payment-api",
+            )
+        ]
+        scenario.effective_operation = replace(
+            scenario.effective_operation,
+            service="payment-api",
+        )
+
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.DETECTED
+
+        scenario.effective_operation = replace(
+            scenario.effective_operation,
+            service="payment",
+        )
+        result = DETECTOR.analyze(scenario)
+
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+
+
 # ===================================================================
 # 7. MISSING ORIGINAL AUTHORITY  →  INSUFFICIENT_EVIDENCE
 # ===================================================================
@@ -259,11 +440,12 @@ class TestMissingActionRequirement:
 
 
 class TestUnrelatedDownstreamOperation:
-    """products:read action should not trigger a finding."""
+    """A mismatched final recipient and operation service are insufficient."""
 
     def test_verdict(self):
         result = DETECTOR.analyze(unrelated_downstream_operation())
-        assert result.verdict == Verdict.NOT_DETECTED
+        assert result.verdict == Verdict.INSUFFICIENT_EVIDENCE
+        assert "Cannot verify" in result.reason
 
 
 # ===================================================================
@@ -808,3 +990,129 @@ def test_identical_scenarios_produce_identical_results():
     assert first.reason == second.reason
     assert first.details == second.details
     assert replace(first.finding, finding_id=second.finding.finding_id) == second.finding
+
+
+def test_excess_original_authority_propagation_is_not_assessed():
+    """Unneeded permissions already held by the initiator are not flagged."""
+    scenario = legitimate_direct_authorization()
+    broad_authority = Authority.delegated(
+        "orders:read", "payments:charge", "admin:delete"
+    )
+    scenario.original_authority = Authority.original(
+        "orders:read", "payments:charge", "admin:delete"
+    )
+    scenario.delegation_chain = [
+        replace(step, delegated_authority=broad_authority)
+        for step in scenario.delegation_chain
+    ]
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.NOT_DETECTED
+    assert "legitimately authorized" in result.reason
+
+
+def test_circular_delegation_is_not_reported_as_a_cycle_finding():
+    """A cycle is not analyzed when the required action remains authorized."""
+    scenario = legitimate_direct_authorization()
+    first_step, second_step = scenario.delegation_chain[:2]
+    scenario.delegation_chain = [
+        replace(
+            first_step,
+            to_principal=AGENT,
+            delegated_authority=Authority.delegated(
+                "orders:read", "payments:charge"
+            ),
+        ),
+        replace(
+            second_step,
+            from_principal=AGENT,
+            to_principal=CHECKOUT_SERVICE,
+            delegated_authority=Authority.delegated(
+                "orders:read", "payments:charge"
+            ),
+        ),
+        DelegationStep(
+            from_principal=CHECKOUT_SERVICE,
+            to_principal=AGENT,
+            delegated_authority=Authority.delegated(
+                "orders:read", "payments:charge"
+            ),
+        ),
+        DelegationStep(
+            from_principal=AGENT,
+            to_principal=PAYMENT_SERVICE,
+            delegated_authority=Authority.delegated(
+                "orders:read", "payments:charge"
+            ),
+        ),
+    ]
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.NOT_DETECTED
+    assert "legitimately authorized" in result.reason
+
+
+def test_direct_self_delegation_cycle_does_not_skip_authorization_checks():
+    scenario = legitimate_direct_authorization()
+    first_step = scenario.delegation_chain[0]
+    scenario.delegation_chain = [
+        replace(
+            first_step,
+            to_principal=PAYMENT_SERVICE,
+            delegated_authority=Authority.delegated(
+                "orders:read", "payments:charge"
+            ),
+        ),
+        DelegationStep(
+            from_principal=PAYMENT_SERVICE,
+            to_principal=PAYMENT_SERVICE,
+            delegated_authority=Authority.delegated(
+                "orders:read", "payments:charge"
+            ),
+        ),
+    ]
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.NOT_DETECTED
+
+
+def test_unauthorized_expansion_inside_cyclic_chain_is_still_detected():
+    scenario = golden_confused_deputy()
+    scenario.delegation_chain = [
+        DelegationStep(
+            from_principal=USER_123,
+            to_principal=AGENT,
+            delegated_authority=Authority.delegated("orders:read"),
+            credential_type=CredentialType.USER_TOKEN,
+        ),
+        DelegationStep(
+            from_principal=AGENT,
+            to_principal=CHECKOUT_SERVICE,
+            delegated_authority=Authority.delegated("orders:read"),
+        ),
+        DelegationStep(
+            from_principal=CHECKOUT_SERVICE,
+            to_principal=AGENT,
+            delegated_authority=Authority.delegated(
+                "orders:read", "admin:delete"
+            ),
+        ),
+        DelegationStep(
+            from_principal=AGENT,
+            to_principal=PAYMENT_SERVICE,
+            delegated_authority=Authority.delegated(
+                "orders:read", "admin:delete"
+            ),
+        ),
+    ]
+
+    result = DETECTOR.analyze(scenario)
+
+    assert result.verdict == Verdict.DETECTED
+    assert result.finding.finding_type == FindingType.UNAUTHORIZED_DELEGATION
+    assert result.details["unauthorized_expansions"][0]["permissions"] == [
+        "admin:delete"
+    ]

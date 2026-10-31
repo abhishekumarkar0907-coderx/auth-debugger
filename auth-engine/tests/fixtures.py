@@ -358,7 +358,7 @@ def missing_action_requirement() -> AuthorizationScenario:
 
 
 # ---------------------------------------------------------------------------
-# 9. UNRELATED DOWNSTREAM OPERATION  (NOT_DETECTED)
+# 9. UNRELATED DOWNSTREAM OPERATION  (INSUFFICIENT_EVIDENCE)
 # ---------------------------------------------------------------------------
 
 def unrelated_downstream_operation() -> AuthorizationScenario:
@@ -366,7 +366,11 @@ def unrelated_downstream_operation() -> AuthorizationScenario:
     User has ``orders:read``, and the downstream operation is
     ``products:read`` — entirely within the user's authority.
 
-    Expected: NOT_DETECTED
+    The delegated recipient is ``order-svc`` while the operation service is
+    ``product-catalog``; without identity evidence connecting them, the engine
+    cannot assign the operation to this delegation chain.
+
+    Expected: INSUFFICIENT_EVIDENCE
     """
     return AuthorizationScenario(
         trace_id="trace-unrelated-001",
@@ -472,7 +476,7 @@ ALL_FIXTURES: dict[str, tuple[callable, Verdict]] = {
     ),
     "unrelated_downstream_operation": (
         unrelated_downstream_operation,
-        Verdict.NOT_DETECTED,
+        Verdict.INSUFFICIENT_EVIDENCE,
     ),
     "missing_effective_operation": (
         missing_effective_operation,

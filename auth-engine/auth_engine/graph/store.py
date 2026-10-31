@@ -17,6 +17,7 @@ from auth_engine.models import (
     Operation,
     PrincipalType,
 )
+from auth_engine.service_identity import identifies_service
 
 from .models import (
     DelegationEdge,
@@ -306,10 +307,20 @@ class AuthorizationGraph:
             # Identify acting service principal
             acting_service_id = None
             if scenario.delegation_chain:
-                acting_service_id = scenario.delegation_chain[-1].to_principal.principal_id
-            elif scenario.service_identities:
+                final_recipient = scenario.delegation_chain[-1].to_principal
+                if identifies_service(
+                    final_recipient,
+                    op.service,
+                    scenario.service_identities,
+                ):
+                    acting_service_id = final_recipient.principal_id
+            if not acting_service_id and scenario.service_identities:
                 for svc in scenario.service_identities:
-                    if svc.service_name == op.service or svc.principal_id == op.service:
+                    if identifies_service(
+                        svc,
+                        op.service,
+                        scenario.service_identities,
+                    ):
                         acting_service_id = svc.principal_id
                         break
             if not acting_service_id:

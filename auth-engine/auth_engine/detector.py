@@ -23,6 +23,7 @@ from .models import (
 )
 from .policy import ActionPolicy, default_otel_demo_policy
 from .delegation_policy import DelegationPolicy
+from .service_identity import identifies_service
 
 
 class ConfusedDeputyDetector:
@@ -72,6 +73,19 @@ class ConfusedDeputyDetector:
         assert scenario.initiating_principal is not None
         assert scenario.original_authority is not None
         assert scenario.effective_operation is not None
+
+        expected_source = scenario.initiating_principal.principal_id
+        for hop_index, step in enumerate(scenario.delegation_chain, start=1):
+            if step.from_principal.principal_id != expected_source:
+                return self._insufficient(
+                    scenario,
+                    reason=(
+                        f"Delegation chain is disconnected at hop {hop_index}: "
+                        f"expected source principal '{expected_source}', got "
+                        f"'{step.from_principal.principal_id}'"
+                    ),
+                )
+            expected_source = step.to_principal.principal_id
 
         # ---- Step 2: Determine required authority -----------------------
 
@@ -172,6 +186,22 @@ class ConfusedDeputyDetector:
                     "the final delegated request authority is unknown"
                 ),
             )
+
+        if scenario.delegation_chain:
+            final_recipient = scenario.delegation_chain[-1].to_principal
+            if not identifies_service(
+                final_recipient,
+                operation.service,
+                scenario.service_identities,
+            ):
+                return self._insufficient(
+                    scenario,
+                    reason=(
+                        "Cannot verify that final delegation recipient "
+                        f"'{final_recipient.principal_id}' is the service "
+                        f"'{operation.service}' executing the operation"
+                    ),
+                )
 
         # ---- Step 4 + 5: Compare required vs. request -------------------
 
@@ -351,6 +381,29 @@ class ConfusedDeputyDetector:
                 reason="Effective downstream operation is missing from the scenario",
             )
 
+        extraction_warnings = scenario.evidence.get("extraction_warnings", [])
+        if isinstance(extraction_warnings, list):
+            incomplete_hops = [
+                warning
+                for warning in extraction_warnings
+                if isinstance(warning, dict)
+                and warning.get("field") in {"delegation.from", "delegation.to"}
+                and warning.get("type")
+                in {"missing", "malformed", "conflicting"}
+            ]
+            if incomplete_hops:
+                details = "; ".join(
+                    str(warning.get("message", warning.get("field")))
+                    for warning in incomplete_hops
+                )
+                return self._insufficient(
+                    scenario,
+                    reason=(
+                        "Delegation relationship evidence is incomplete or "
+                        f"conflicting: {details}"
+                    ),
+                )
+
         # The operation must have enough info to resolve required authority.
         op = scenario.effective_operation
         if (
@@ -507,6 +560,7 @@ class ConfusedDeputyDetector:
             finding_type=FindingType.NONE,
             trace_id=scenario.trace_id,
             initiating_principal=scenario.initiating_principal,
+            evidence=scenario.evidence,
             reason=reason,
             severity=Severity.UNSCORED,
         )

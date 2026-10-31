@@ -1,31 +1,39 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import type {
-  SecurityAnalysis,
-  SpanRecord,
-  TraceGraphResponse,
-  TraceSummary,
-} from '../types.ts';
-import {
-  fetchHealth,
-  fetchTraces,
-  fetchTraceGraph,
-  fetchTraceSpans,
-  fetchRecentSpans,
-  getInitialApiBaseUrl,
-} from '../api.ts';
+import type { AnalysisPanelState, SpanRecord, TraceGraphResponse, TraceSummary } from '../types.ts';
+import { shouldRequestExplanation, type AiExplanationLoader } from '../services/aiExplanation.ts';
+import { fetchTraceExplanation, getInitialApiBaseUrl } from '../api.ts';
+import { createInvestigationApi, type InvestigationDataSource } from '../services/investigationApi.ts';
 import { computeTraceMetrics, formatDuration } from '../utils/spanHelpers.ts';
 import { COPY, resolveWorkspaceMainState } from '../utils/stateHelpers.ts';
 import { TraceList } from './TraceList.tsx';
 import { SpanTree } from './SpanTree.tsx';
 import { SpanDetail } from './SpanDetail.tsx';
-import { AuthorizationGraphPanel } from './AuthorizationGraphPanel.tsx';
 import { SecurityAnalysisPanel } from './SecurityAnalysisPanel.tsx';
+import { AiExplanationPanel } from './AiExplanationPanel.tsx';
+import { AuthorizationGraphPanel } from './AuthorizationGraphPanel.tsx';
+import { CaseInvestigation } from './CaseInvestigation.tsx';
+
+type AuthorizationGraphState =
+  | { kind: 'loading' }
+  | { kind: 'empty'; message: string }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; graph: TraceGraphResponse };
 
 export const TraceExplorer: React.FC = () => {
   // Configuration
   const [apiBaseUrl, setApiBaseUrl] = useState<string>(getInitialApiBaseUrl);
   const [isEditingUrl, setIsEditingUrl] = useState<boolean>(false);
   const [tempUrl, setTempUrl] = useState<string>(apiBaseUrl);
+
+  // Demo fixtures are the default so the workspace is usable without a backend.
+  const [dataSource, setDataSource] = useState<InvestigationDataSource>(() => {
+    try {
+      return localStorage.getItem('authorization-debugger-data-source') === 'live' ? 'live' : 'demo';
+    } catch {
+      return 'demo';
+    }
+  });
+  const apiClient = useMemo(() => createInvestigationApi(dataSource, apiBaseUrl), [apiBaseUrl, dataSource]);
 
   // Backend connection status
   const [backendStatus, setBackendStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking');
@@ -41,15 +49,19 @@ export const TraceExplorer: React.FC = () => {
   const [spans, setSpans] = useState<SpanRecord[]>([]);
   const [isLoadingSpans, setIsLoadingSpans] = useState<boolean>(false);
   const [spansError, setSpansError] = useState<string | null>(null);
-  const [securityAnalysis, setSecurityAnalysis] = useState<SecurityAnalysis | null>(null);
-  const [securityAnalysisError, setSecurityAnalysisError] = useState<string | null>(null);
-  const [traceGraph, setTraceGraph] = useState<TraceGraphResponse | null>(null);
 
   // Selected span for detailed inspection
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  const [detailPanel, setDetailPanel] = useState<'span' | 'security'>('span');
 
-  // View mode: 'by-trace' | 'recent-spans'
-  const [viewMode, setViewMode] = useState<'by-trace' | 'recent-spans'>('by-trace');
+  // Security analysis state
+  const [analysisState, setAnalysisState] = useState<AnalysisPanelState>({ kind: 'loading' });
+  const [authorizationGraphState, setAuthorizationGraphState] = useState<AuthorizationGraphState>({
+    kind: 'loading',
+  });
+
+  // View mode: trace explorer, recent activity, or the guided case walkthrough.
+  const [viewMode, setViewMode] = useState<'by-trace' | 'recent-spans' | 'case-demo'>('by-trace');
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
       return localStorage.getItem('authorization-debugger-theme') === 'dark' ? 'dark' : 'light';
@@ -67,11 +79,87 @@ export const TraceExplorer: React.FC = () => {
     }
   }, [theme]);
 
+  // Request deterministic security analysis when selected trace changes
+  useEffect(() => {
+    if (!selectedTraceId) {
+      setAnalysisState({ kind: 'empty', message: 'Select a trace to review its security analysis.' });
+      setAuthorizationGraphState({ kind: 'empty', message: 'Select a trace to load its authorization graph.' });
+      return;
+    }
+    let cancelled = false;
+    setAnalysisState({ kind: 'loading' });
+    setAuthorizationGraphState({ kind: 'loading' });
+    apiClient
+      .graph(selectedTraceId)
+      .then((res) => {
+        if (cancelled) return;
+        if (!res) {
+          setAnalysisState({ kind: 'empty' });
+          setAuthorizationGraphState({ kind: 'empty', message: 'No graph response was returned for this trace.' });
+        } else {
+          setAuthorizationGraphState({ kind: 'ready', graph: res });
+          setAnalysisState(res.security_analysis
+            ? { kind: 'ready', analysis: res.security_analysis }
+            : { kind: 'empty' });
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setAnalysisState({
+          kind: 'error',
+          message,
+        });
+        setAuthorizationGraphState({ kind: 'error', message });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiClient, selectedTraceId]);
+
+  const loadExplanation: AiExplanationLoader = useCallback(async (findingId, signal) => {
+    if (dataSource === 'demo') {
+      return {
+        status: 'ready' as const,
+        finding_id: findingId,
+        explanation: {
+          summary: {
+            text: 'A delegated service token was swapped across service boundaries without sufficient permissions for the requested ledger export action.',
+            evidence_refs: ['source_span_id', 'resource'],
+          },
+          why_detected: {
+            text: 'The effective operation requires finance:export authority, but the delegated request credential only carried reports:read.',
+            evidence_refs: ['reason'],
+          },
+          authority_difference: {
+            text: 'Missing required authority: finance:export. The acting service held reports:read.',
+            evidence_refs: ['resource'],
+          },
+          request_path_explanation: {
+            text: 'The request initiated from Maya Chen, routed through the finance portal to the reporting worker, where the token swap took place.',
+            evidence_refs: ['source_span_id'],
+          },
+          limitations: ['Network-level egress controls were not inspected.'],
+          remediation: [
+            {
+              text: 'Ensure the token exchange preserves original user authority constraints or rejects operations exceeding delegated scopes.',
+              evidence_refs: ['reason'],
+            },
+          ],
+        },
+      };
+    }
+    if (!selectedTraceId) {
+      throw new Error('Select a trace before requesting an AI explanation.');
+    }
+    return fetchTraceExplanation(selectedTraceId, findingId, signal, apiBaseUrl);
+  }, [apiBaseUrl, dataSource, selectedTraceId]);
+
   // Check backend health
   const checkHealth = useCallback(async (url: string) => {
     try {
       setBackendStatus('checking');
-      const res = await fetchHealth(url);
+      const res = await createInvestigationApi('live', url).health();
       if (res && res.status === 'ok') {
         setBackendStatus('connected');
       } else {
@@ -83,16 +171,18 @@ export const TraceExplorer: React.FC = () => {
   }, []);
 
   // Load traces
-  const loadTraces = useCallback(async (url: string) => {
+  const loadTraces = useCallback(async () => {
     setIsLoadingTraces(true);
     setTraceError(null);
     try {
-      const data = await fetchTraces(url);
+      const data = await apiClient.traces();
       setTraces(data);
       setHasLoadedTraces(true);
       // Auto-select first trace if none selected
-      if (data.length > 0 && !selectedTraceId) {
+      if (data.length > 0 && (!selectedTraceId || !data.some((trace) => trace.trace_id === selectedTraceId))) {
         setSelectedTraceId(data[0].trace_id);
+      } else if (data.length === 0) {
+        setSelectedTraceId(null);
       }
     } catch (err) {
       setTraceError(err instanceof Error ? err.message : String(err));
@@ -100,17 +190,14 @@ export const TraceExplorer: React.FC = () => {
     } finally {
       setIsLoadingTraces(false);
     }
-  }, [selectedTraceId]);
+  }, [apiClient, selectedTraceId]);
 
   // Load spans for selected trace
-  const loadTraceSpans = useCallback(async (traceId: string, url: string) => {
+  const loadTraceSpans = useCallback(async (traceId: string) => {
     setIsLoadingSpans(true);
     setSpansError(null);
-    setSecurityAnalysis(null);
-    setSecurityAnalysisError(null);
-    setTraceGraph(null);
     try {
-      const data = await fetchTraceSpans(traceId, url);
+      const data = await apiClient.traceSpans(traceId);
       setSpans(data);
       if (data.length > 0) {
         // Default to root span or first span
@@ -119,34 +206,22 @@ export const TraceExplorer: React.FC = () => {
       } else {
         setSelectedSpanId(null);
       }
-      try {
-        const graph = await fetchTraceGraph(traceId, url);
-        setTraceGraph(graph);
-        setSecurityAnalysis(graph.security_analysis ?? null);
-      } catch (err) {
-        setSecurityAnalysisError(err instanceof Error ? err.message : String(err));
-      }
     } catch (err) {
       setSpansError(err instanceof Error ? err.message : String(err));
       setSpans([]);
       setSelectedSpanId(null);
-      setTraceGraph(null);
-      setSecurityAnalysis(null);
     } finally {
       setIsLoadingSpans(false);
     }
-  }, []);
+  }, [apiClient]);
 
   // Load recent spans across all traces
-  const loadRecentSpans = useCallback(async (url: string) => {
+  const loadRecentSpans = useCallback(async () => {
     setIsLoadingSpans(true);
     setSpansError(null);
     try {
-      const data = await fetchRecentSpans(100, url);
+      const data = await apiClient.recentSpans(100);
       setSpans(data);
-      setTraceGraph(null);
-      setSecurityAnalysis(null);
-      setSecurityAnalysisError(null);
       if (data.length > 0) {
         setSelectedSpanId(data[0].span_id);
       } else {
@@ -155,31 +230,56 @@ export const TraceExplorer: React.FC = () => {
     } catch (err) {
       setSpansError(err instanceof Error ? err.message : String(err));
       setSpans([]);
-      setTraceGraph(null);
       setSelectedSpanId(null);
     } finally {
       setIsLoadingSpans(false);
     }
-  }, []);
+  }, [apiClient]);
 
   // Initial load
   useEffect(() => {
-    checkHealth(apiBaseUrl);
-    loadTraces(apiBaseUrl);
-  }, [apiBaseUrl, checkHealth, loadTraces]);
+    if (dataSource === 'live') {
+      checkHealth(apiBaseUrl);
+    } else {
+      setBackendStatus('disconnected');
+    }
+    loadTraces();
+  }, [apiBaseUrl, apiClient, checkHealth, dataSource, loadTraces]);
 
   // Load spans when selected trace changes
   useEffect(() => {
     if (viewMode === 'by-trace' && selectedTraceId) {
-      loadTraceSpans(selectedTraceId, apiBaseUrl);
+      loadTraceSpans(selectedTraceId);
     } else if (viewMode === 'recent-spans') {
-      loadRecentSpans(apiBaseUrl);
+      loadRecentSpans();
     }
-  }, [selectedTraceId, viewMode, apiBaseUrl, loadTraceSpans, loadRecentSpans]);
+  }, [selectedTraceId, viewMode, loadTraceSpans, loadRecentSpans]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('authorization-debugger-data-source', dataSource);
+    } catch {
+      // The selected source still works for this session when storage is unavailable.
+    }
+  }, [dataSource]);
 
   const handleApplyUrl = () => {
     setApiBaseUrl(tempUrl.trim());
     setIsEditingUrl(false);
+  };
+
+  const handleDataSourceChange = (source: InvestigationDataSource) => {
+    if (source === dataSource) return;
+    setDataSource(source);
+    setTraces([]);
+    setHasLoadedTraces(false);
+    setTraceError(null);
+    setSelectedTraceId(null);
+    setSelectedSpanId(null);
+    setSpans([]);
+    setSpansError(null);
+    setAnalysisState({ kind: 'loading' });
+    setAuthorizationGraphState({ kind: 'loading' });
   };
 
   const handleResetUrl = () => {
@@ -197,6 +297,12 @@ export const TraceExplorer: React.FC = () => {
   const selectedSpan = useMemo(() => {
     return spans.find((s) => s.span_id === selectedSpanId) || null;
   }, [spans, selectedSpanId]);
+
+  const analysisTraceId = viewMode === 'by-trace' ? selectedTraceId : selectedSpan?.trace_id || null;
+  const analysisSpans = useMemo(
+    () => viewMode === 'by-trace' ? spans : spans.filter((span) => span.trace_id === analysisTraceId),
+    [analysisTraceId, spans, viewMode]
+  );
 
   const workspaceState = resolveWorkspaceMainState({
     traceError,
@@ -232,6 +338,15 @@ export const TraceExplorer: React.FC = () => {
           title="Recent activity"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M4 12h7M4 17h10"/><path d="m16 15 2 2 4-5"/></svg>
+        </button>
+        <button
+          type="button"
+          className={`rail-button ${viewMode === 'case-demo' ? 'active' : ''}`}
+          onClick={() => setViewMode('case-demo')}
+          aria-label="Case investigation walkthrough"
+          title="Case investigation walkthrough"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="6" r="2.4"/><circle cx="17" cy="8" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="m9 7 5.7.7M8.2 8.1l2.8 7.6m4.8-5.5-2.5 5.6"/></svg>
         </button>
         <span className="rail-spacer" />
         <button
@@ -288,16 +403,29 @@ export const TraceExplorer: React.FC = () => {
             >
               Recent activity
             </button>
+            <button
+              type="button"
+              className={`mode-btn ${viewMode === 'case-demo' ? 'active' : ''}`}
+              onClick={() => setViewMode('case-demo')}
+              id="mode-case-demo"
+            >
+              Case walkthrough
+            </button>
+          </div>
+
+          <div className="data-source-toggle" role="group" aria-label="Data source">
+            <button type="button" className={dataSource === 'demo' ? 'active' : ''} onClick={() => handleDataSourceChange('demo')}>Sample data</button>
+            <button type="button" className={dataSource === 'live' ? 'active' : ''} onClick={() => handleDataSourceChange('live')}>Live API</button>
           </div>
 
           {/* Backend Connection & Config Indicator */}
           <div className="backend-config-pill" id="backend-status-pill">
-            <span className={`status-dot ${backendStatus}`} />
+            <span className={`status-dot ${dataSource === 'demo' ? 'demo' : backendStatus}`} />
             <span className="status-label">
-              {backendStatus === 'connected' ? 'Service online' : backendStatus === 'checking' ? 'Checking service…' : 'Backend offline'}
+              {dataSource === 'demo' ? 'Offline demo' : backendStatus === 'connected' ? 'Service online' : backendStatus === 'checking' ? 'Checking service…' : 'Backend offline'}
             </span>
             <code className="active-url" title={apiBaseUrl || 'Same-origin relative requests proxied by Vite to http://localhost:8000'}>
-              {apiBaseUrl ? apiBaseUrl.replace(/^https?:\/\//, '') : 'Vite Proxy (:8000)'}
+              {dataSource === 'demo' ? 'Local sample cases' : apiBaseUrl ? apiBaseUrl.replace(/^https?:\/\//, '') : 'Vite Proxy (:8000)'}
             </code>
             <button
               type="button"
@@ -355,7 +483,8 @@ export const TraceExplorer: React.FC = () => {
       )}
 
       {/* Main Content Workspace */}
-      <main className="explorer-workspace">
+      <main className={`explorer-workspace ${viewMode === 'case-demo' ? 'case-demo-mode' : ''}`}>
+        {viewMode === 'case-demo' ? <CaseInvestigation /> : (
         <div className="workspace-panels">
           {/* Left Pane: Trace List */}
           {viewMode === 'by-trace' && (
@@ -363,13 +492,16 @@ export const TraceExplorer: React.FC = () => {
               <TraceList
                 traces={traces}
                 selectedTraceId={selectedTraceId}
-                onSelectTrace={(id) => setSelectedTraceId(id)}
+                onSelectTrace={(id) => {
+                  setSelectedTraceId(id);
+                  setDetailPanel('span');
+                }}
                 isLoading={isLoadingTraces}
                 hasError={!!traceError}
                 hasLoaded={hasLoadedTraces}
                 onRefresh={() => {
-                  checkHealth(apiBaseUrl);
-                  loadTraces(apiBaseUrl);
+                  if (dataSource === 'live') checkHealth(apiBaseUrl);
+                  loadTraces();
                 }}
               />
             </aside>
@@ -386,8 +518,8 @@ export const TraceExplorer: React.FC = () => {
                 type="button"
                 className="btn-primary btn-retry-main"
                 onClick={() => {
-                  checkHealth(apiBaseUrl);
-                  loadTraces(apiBaseUrl);
+                  if (dataSource === 'live') checkHealth(apiBaseUrl);
+                  loadTraces();
                 }}
                 id="btn-retry-traces"
               >
@@ -406,8 +538,8 @@ export const TraceExplorer: React.FC = () => {
                 className="btn-primary btn-retry-main"
                 onClick={() =>
                   viewMode === 'by-trace' && selectedTraceId
-                    ? loadTraceSpans(selectedTraceId, apiBaseUrl)
-                    : loadRecentSpans(apiBaseUrl)
+                    ? loadTraceSpans(selectedTraceId)
+                    : loadRecentSpans()
                 }
                 id="btn-retry-spans"
               >
@@ -492,20 +624,6 @@ export const TraceExplorer: React.FC = () => {
                 </div>
               )}
 
-              {selectedTraceId && viewMode === 'by-trace' && (
-                <SecurityAnalysisPanel
-                  analysis={securityAnalysis}
-                  error={securityAnalysisError}
-                />
-              )}
-
-              {selectedTraceId && viewMode === 'by-trace' && (
-                <AuthorizationGraphPanel
-                  graph={traceGraph}
-                  error={securityAnalysisError}
-                />
-              )}
-
               <div className="spans-layout-split">
                 <div className="spans-tree-pane">
                   <SpanTree
@@ -516,16 +634,72 @@ export const TraceExplorer: React.FC = () => {
                   />
                 </div>
                 <div className="spans-detail-sidebar">
-                  <SpanDetail
-                    span={selectedSpan}
-                    onClose={() => setSelectedSpanId(null)}
-                  />
+                  <div className="detail-panel-tabs" role="tablist" aria-label="Investigation panels">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={detailPanel === 'span'}
+                      className={detailPanel === 'span' ? 'active' : ''}
+                      onClick={() => setDetailPanel('span')}
+                    >
+                      Span details
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={detailPanel === 'security'}
+                      className={detailPanel === 'security' ? 'active' : ''}
+                      onClick={() => setDetailPanel('security')}
+                    >
+                      Security analysis
+                    </button>
+                  </div>
+                  {detailPanel === 'span' ? (
+                    <SpanDetail span={selectedSpan} onClose={() => setSelectedSpanId(null)} />
+                  ) : (
+                    <div className="analysis-panel-stack">
+                      <SecurityAnalysisPanel
+                        traceId={analysisTraceId}
+                        spans={analysisSpans}
+                        analysisState={analysisState}
+                        onSelectSpan={(spanId) => {
+                          setSelectedSpanId(spanId);
+                          setDetailPanel('span');
+                        }}
+                      />
+                      <AuthorizationGraphPanel
+                        key={authorizationGraphState.kind === 'ready'
+                          ? authorizationGraphState.graph.trace_id
+                          : 'authorization-graph'}
+                        state={authorizationGraphState}
+                        dataSource={dataSource}
+                      />
+                      {analysisState.kind === 'ready' &&
+                        shouldRequestExplanation(
+                          analysisState.analysis.verdict,
+                          analysisState.analysis.finding.finding_id,
+                        ) && (
+                        <AiExplanationPanel
+                          findingId={analysisState.analysis.finding.finding_id}
+                          loadExplanation={loadExplanation}
+                          dataSource={dataSource}
+                          evidence={analysisState.analysis.finding.evidence}
+                          spans={analysisSpans}
+                          onSelectSpan={(spanId) => {
+                            setSelectedSpanId(spanId);
+                            setDetailPanel('span');
+                          }}
+                        />
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             </>
           )}
           </section>
         </div>
+        )}
       </main>
       </div>
     </div>

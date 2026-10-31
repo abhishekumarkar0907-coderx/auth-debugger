@@ -6,7 +6,7 @@ import os
 from hashlib import sha256
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from google.protobuf.message import DecodeError
 from pydantic import ValidationError
 from dataclasses import fields, is_dataclass
@@ -37,6 +37,8 @@ from .security_engine import analyze_security_spans, analyze_security_trace
 from .store import InMemorySpanStore
 from auth_engine.graph.adapter import build_graph_from_spans
 from auth_engine.graph import find_authority_amplification_hops
+
+from . import ai_explanation
 
 app = FastAPI(
     title="Authorization Debugger Backend",
@@ -524,6 +526,87 @@ async def trace_graph(trace_id: str) -> TraceGraphResponse:
             reason_override=reason_override,
         ),
     )
+
+
+@app.get("/api/v1/traces/{trace_id}/explanation")
+async def trace_explanation(
+    trace_id: str,
+    finding_id: Annotated[str, Query(min_length=1, max_length=160)],
+) -> dict[str, object]:
+    spans = store.trace(trace_id)
+    if not spans:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    try:
+        context = extract_authorization_context(
+            spans,
+            service_authority_config=_configured_service_authorities(),
+        )
+        if not context.has_sufficient_evidence() or context.outcome_success is not True:
+            return {
+                "status": "insufficient_evidence",
+                "finding_id": finding_id,
+                "explanation": None,
+                "message": "The deterministic analysis did not provide enough evidence for an AI explanation.",
+            }
+
+        scenario = context.to_scenario(policy=action_policy)
+        result = ConfusedDeputyDetector(
+            policy=action_policy,
+            delegation_policy=_load_delegation_policy(),
+        ).analyze(scenario)
+        if result.verdict is not Verdict.DETECTED:
+            return {
+                "status": "insufficient_evidence",
+                "finding_id": finding_id,
+                "explanation": None,
+                "message": "No current detected finding is available to explain.",
+            }
+        if result.finding.finding_id != finding_id:
+            raise HTTPException(
+                status_code=409,
+                detail="The requested finding does not match the current deterministic result",
+            )
+
+        finding = ai_explanation.build_finding_context(
+            result,
+            scenario,
+            request_path=[
+                ai_explanation.RequestHop(
+                    span_id=span.span_id,
+                    parent_span_id=span.parent_span_id,
+                    service_name=span.service_name,
+                    operation=span.span_name,
+                )
+                for span in spans
+            ],
+        )
+        outcome = await ai_explanation.explain_finding(finding)
+    except HTTPException:
+        raise
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Trace contains invalid authorization evidence",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to explain finding %s for trace %s", finding_id, trace_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Finding explanation failed",
+        ) from exc
+
+    return {
+        "status": outcome.status,
+        "finding_id": finding_id,
+        "explanation": (
+            outcome.explanation.model_dump(mode="json")
+            if outcome.explanation
+            else None
+        ),
+        "message": outcome.message,
+    }
+
 
 @app.post("/api/v1/analysis/{trace_id}")
 async def post_analysis(trace_id: str) -> dict:
