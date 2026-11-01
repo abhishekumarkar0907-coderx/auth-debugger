@@ -238,13 +238,13 @@ export const TraceExplorer: React.FC = () => {
 
   // Initial load
   useEffect(() => {
-    if (dataSource === 'live') {
+    if (dataSource === 'live' || viewMode === 'case-demo') {
       checkHealth(apiBaseUrl);
     } else {
       setBackendStatus('disconnected');
     }
     loadTraces();
-  }, [apiBaseUrl, apiClient, checkHealth, dataSource, loadTraces]);
+  }, [apiBaseUrl, apiClient, checkHealth, dataSource, loadTraces, viewMode]);
 
   // Load spans when selected trace changes
   useEffect(() => {
@@ -420,12 +420,12 @@ export const TraceExplorer: React.FC = () => {
 
           {/* Backend Connection & Config Indicator */}
           <div className="backend-config-pill" id="backend-status-pill">
-            <span className={`status-dot ${dataSource === 'demo' ? 'demo' : backendStatus}`} />
+            <span className={`status-dot ${dataSource === 'demo' && viewMode !== 'case-demo' ? 'demo' : backendStatus}`} />
             <span className="status-label">
-              {dataSource === 'demo' ? 'Offline demo' : backendStatus === 'connected' ? 'Service online' : backendStatus === 'checking' ? 'Checking service…' : 'Backend offline'}
+              {dataSource === 'demo' && viewMode !== 'case-demo' ? 'Offline demo' : backendStatus === 'connected' ? 'Backend online' : backendStatus === 'checking' ? 'Checking backend…' : 'Backend offline'}
             </span>
             <code className="active-url" title={apiBaseUrl || 'Same-origin relative requests proxied by Vite to http://localhost:8000'}>
-              {dataSource === 'demo' ? 'Local sample cases' : apiBaseUrl ? apiBaseUrl.replace(/^https?:\/\//, '') : 'Vite Proxy (:8000)'}
+              {dataSource === 'demo' && viewMode !== 'case-demo' ? 'Local sample cases' : apiBaseUrl ? apiBaseUrl.replace(/^https?:\/\//, '') : 'Vite Proxy (:8000)'}
             </code>
             <button
               type="button"
@@ -484,7 +484,7 @@ export const TraceExplorer: React.FC = () => {
 
       {/* Main Content Workspace */}
       <main className={`explorer-workspace ${viewMode === 'case-demo' ? 'case-demo-mode' : ''}`}>
-        {viewMode === 'case-demo' ? <CaseInvestigation /> : (
+        {viewMode === 'case-demo' ? <CaseInvestigation apiBaseUrl={apiBaseUrl} /> : (
         <div className="workspace-panels">
           {/* Left Pane: Trace List */}
           {viewMode === 'by-trace' && (

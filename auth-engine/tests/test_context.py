@@ -155,6 +155,16 @@ class TestCompleteContext:
         ctx = extract_authorization_context(_complete_span_set())
         assert len(ctx.delegation_hops) == 2
 
+    def test_delegation_hops_follow_chain_when_spans_arrive_out_of_order(self):
+        spans = list(reversed(_complete_span_set()))
+
+        ctx = extract_authorization_context(spans)
+
+        assert [hop.from_id for hop in ctx.delegation_hops] == [
+            "user-123",
+            "checkout-svc",
+        ]
+
     def test_has_sufficient_evidence(self):
         ctx = extract_authorization_context(_complete_span_set())
         assert ctx.has_sufficient_evidence() is True

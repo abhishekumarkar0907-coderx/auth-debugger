@@ -1,4 +1,5 @@
 ﻿from fastapi.testclient import TestClient
+import pytest
 
 from app.main import app, store, analysis_results
 from app.schemas import SpanRecord
@@ -191,6 +192,76 @@ def test_demo_trace_loads_and_is_detected_in_graph(monkeypatch) -> None:
     analysis = graph.json()["security_analysis"]
     assert analysis["verdict"] == "DETECTED"
     assert analysis["findings"][0]["classification"] == "UNAUTHORIZED_DELEGATION"
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "expected_verdict"),
+    [
+        ("suspicious-delegation", "DETECTED"),
+        ("normal-request", "NOT_DETECTED"),
+        ("insufficient-evidence", "INSUFFICIENT_EVIDENCE"),
+    ],
+)
+def test_demo_scenarios_use_deterministic_graph_analysis(
+    monkeypatch,
+    scenario_id: str,
+    expected_verdict: str,
+) -> None:
+    monkeypatch.setenv("AUTH_DEBUGGER_ENV", "development")
+    monkeypatch.setenv("AUTH_DEBUGGER_ENABLE_DEMO_TRACE", "true")
+
+    loaded = client.post(f"/api/v1/demo/scenarios/{scenario_id}")
+
+    assert loaded.status_code == 200
+    result = loaded.json()
+    assert result["scenario_id"] == scenario_id
+    assert result["span_count"] == 3
+    assert result["data_source"] == "synthetic_demo"
+
+    graph_response = client.get(
+        f"/api/v1/traces/{result['trace_id']}/graph"
+    )
+
+    assert graph_response.status_code == 200
+    graph = graph_response.json()
+    spans = client.get(f"/api/v1/traces/{result['trace_id']}").json()
+    assert [span["service_name"] for span in spans] == [
+        "api-gateway",
+        "order-service",
+        "payment",
+    ]
+    assert spans[1]["parent_span_id"] == spans[0]["span_id"]
+    assert spans[2]["parent_span_id"] == spans[1]["span_id"]
+    assert graph["security_analysis"]["verdict"] == expected_verdict
+    if scenario_id == "suspicious-delegation":
+        assert (
+            graph["security_analysis"]["finding"]["finding_type"]
+            == "UNAUTHORIZED_DELEGATION"
+        )
+    if scenario_id == "insufficient-evidence":
+        assert not any(
+            edge["type"] == "delegation" and edge["target"] == "payment"
+            for edge in graph["edges"]
+        )
+        assert any(
+            warning["field"] == "delegation.to"
+            for warning in graph["security_analysis"]["finding"]["evidence"][
+                "extraction_warnings"
+            ]
+        )
+
+
+def test_demo_scenarios_are_disabled_without_development_opt_in(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AUTH_DEBUGGER_ENV", raising=False)
+    monkeypatch.delenv("AUTH_DEBUGGER_ENABLE_DEMO_TRACE", raising=False)
+
+    response = client.post(
+        "/api/v1/demo/scenarios/suspicious-delegation"
+    )
+
+    assert response.status_code == 404
 
 
 def test_post_analysis_detects_unauthorized_delegation_expansion() -> None:

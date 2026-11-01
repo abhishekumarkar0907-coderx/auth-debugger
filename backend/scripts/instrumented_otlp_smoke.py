@@ -63,7 +63,7 @@ def main() -> None:
                     "authz.principal.type": "user",
                     "authz.principal.scopes": "orders:read",
                     "authz.delegation.from": "checkout-svc",
-                    "authz.delegation.to": "payment-svc",
+                    "authz.delegation.to": "payment",
                     "authz.delegation.scopes": (
                         "orders:read,payments:charge"
                     ),

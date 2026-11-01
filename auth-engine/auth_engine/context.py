@@ -966,6 +966,23 @@ def _resolve_delegation(
     if not hops:
         return
 
+    remaining_hops = list(hops)
+    ordered_hops: list[RawDelegationHop] = []
+    expected_source = ctx.initiating_principal_id
+    while expected_source is not None:
+        matching_hops = [
+            hop for hop in remaining_hops if hop.from_id == expected_source
+        ]
+        if len(matching_hops) != 1:
+            break
+        hop = matching_hops[0]
+        ordered_hops.append(hop)
+        remaining_hops.remove(hop)
+        expected_source = hop.to_id
+        if not remaining_hops:
+            hops = ordered_hops
+            break
+
     # Check for duplicate hops on the same span (conflicting data for
     # the same logical field and hop)
     seen_spans: dict[str | None, list[RawDelegationHop]] = {}

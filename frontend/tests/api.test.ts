@@ -6,6 +6,7 @@ import {
   getInitialApiBaseUrl,
   buildApiUrl,
   ApiError,
+  createDemoScenario,
   fetchHealth,
   fetchTraces,
   fetchTraceSpans,
@@ -39,6 +40,60 @@ test('ApiError preserves status, statusText, and details', () => {
   assert.deepEqual(err.details, { detail: 'Trace not found' });
 });
 
+test('createDemoScenario posts to the selected backend fixture and validates its source', async () => {
+  const originalFetch = globalThis.fetch;
+  const controller = new AbortController();
+  let requestUrl = '';
+  let requestMethod = '';
+  let requestSignal: AbortSignal | null | undefined;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      requestUrl = String(input);
+      requestMethod = init?.method || '';
+      requestSignal = init?.signal;
+      return new Response(JSON.stringify({
+        scenario_id: 'normal-request',
+        trace_id: 'demo-normal',
+        span_count: 3,
+        data_source: 'synthetic_demo',
+      }), { status: 200 });
+    };
+
+    const response = await createDemoScenario(
+      'normal-request',
+      'http://localhost:8000/',
+      controller.signal,
+    );
+
+    assert.equal(requestUrl, 'http://localhost:8000/api/v1/demo/scenarios/normal-request');
+    assert.equal(requestMethod, 'POST');
+    assert.equal(requestSignal, controller.signal);
+    assert.equal(response.data_source, 'synthetic_demo');
+    assert.equal(response.trace_id, 'demo-normal');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('createDemoScenario rejects malformed backend fixture metadata', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      scenario_id: 'normal-request',
+      trace_id: 'demo-normal',
+      span_count: 2,
+      data_source: 'live',
+    }), { status: 200 });
+
+    await assert.rejects(
+      createDemoScenario('normal-request'),
+      { name: 'ApiError', status: 200, statusText: 'ContractError' },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('fetchTraceSpans validates traceId requirement', async () => {
   await assert.rejects(
     async () => {
@@ -59,6 +114,29 @@ test('fetchTraceGraph validates traceId requirement', async () => {
       message: 'trace_id is required',
     }
   );
+});
+
+test('fetchTraceGraph forwards cancellation and preserves abort errors', async () => {
+  const originalFetch = globalThis.fetch;
+  const controller = new AbortController();
+  let requestSignal: AbortSignal | null | undefined;
+  try {
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestSignal = init?.signal;
+      const error = new Error('Request aborted');
+      error.name = 'AbortError';
+      throw error;
+    };
+
+    await assert.rejects(
+      fetchTraceGraph('trace-1', undefined, controller.signal),
+      { name: 'AbortError' },
+    );
+
+    assert.equal(requestSignal, controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('fetchTraceExplanation targets the current finding and forwards cancellation', async () => {

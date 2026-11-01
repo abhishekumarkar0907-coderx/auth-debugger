@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from hashlib import sha256
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from google.protobuf.message import DecodeError
@@ -177,6 +179,91 @@ async def load_unauthorized_delegation_demo() -> dict[str, object]:
         "trace_id": trace_id,
         "spans": 2,
         "graph_url": f"/api/v1/traces/{trace_id}/graph",
+    }
+
+
+@app.post("/api/v1/demo/scenarios/{scenario_id}")
+async def load_demo_scenario(scenario_id: str) -> dict[str, str | int]:
+    scenarios = {
+        "suspicious-delegation": {
+            "scopes": "orders:read",
+            "final_scopes": "orders:read,payments:charge",
+            "incomplete_final_hop": False,
+        },
+        "normal-request": {
+            "scopes": "orders:read,payments:charge",
+            "final_scopes": "orders:read,payments:charge",
+            "incomplete_final_hop": False,
+        },
+        "insufficient-evidence": {
+            "scopes": "orders:read",
+            "final_scopes": "orders:read",
+            "incomplete_final_hop": True,
+        },
+    }
+    if (
+        os.getenv("AUTH_DEBUGGER_ENV") != "development"
+        or os.getenv("AUTH_DEBUGGER_ENABLE_DEMO_TRACE", "").lower() != "true"
+    ):
+        raise HTTPException(status_code=404, detail="Demo scenario not found")
+    scenario = scenarios.get(scenario_id)
+    if scenario is None:
+        raise HTTPException(status_code=404, detail="Demo scenario not found")
+
+    trace_id = f"demo-{scenario_id}-{uuid4().hex}"
+    base_time = time.time_ns()
+    span_ids = [uuid4().hex[:16] for _ in range(3)]
+    services = ["api-gateway", "order-service", "payment"]
+    operations = [
+        "POST /checkout",
+        "GET /orders/123",
+        "oteldemo.PaymentService/Charge",
+    ]
+    hops = [
+        ("demo-user", "api-gateway", scenario["scopes"], "user_token"),
+        ("api-gateway", "order-service", scenario["scopes"], "service_credential"),
+        (
+            "order-service",
+            None if scenario["incomplete_final_hop"] else "payment",
+            scenario["final_scopes"],
+            "service_credential",
+        ),
+    ]
+    for index, (service, operation, hop) in enumerate(
+        zip(services, operations, hops, strict=True)
+    ):
+        delegation_from, delegation_to, delegated_scopes, credential_type = hop
+        attributes: dict[str, object] = {
+            "authz.principal.id": "demo-user",
+            "authz.principal.type": "user",
+            "authz.principal.scopes": scenario["scopes"],
+            "authz.delegation.from": delegation_from,
+            "authz.delegation.scopes": delegated_scopes,
+            "authz.credential.type": credential_type,
+        }
+        if delegation_to is not None:
+            attributes["authz.delegation.to"] = delegation_to
+        start_time = base_time + index * 1_000_000
+        store.add(
+            SpanRecord(
+                trace_id=trace_id,
+                span_id=span_ids[index],
+                parent_span_id=span_ids[index - 1] if index else None,
+                service_name=service,
+                span_name=operation,
+                start_time_unix_nano=start_time,
+                end_time_unix_nano=start_time + 500_000,
+                duration_ms=0.5,
+                span_kind=2 if index == 0 else 3,
+                status_code=1,
+                attributes=attributes,
+            )
+        )
+    return {
+        "scenario_id": scenario_id,
+        "trace_id": trace_id,
+        "span_count": len(services),
+        "data_source": "synthetic_demo",
     }
 
 

@@ -48,6 +48,14 @@ $env:AUTH_DEBUGGER_ENV = "development"
 $env:AUTH_DEBUGGER_ENABLE_DEMO_TRACE = "true"
 ```
 
+The case walkthrough can load three synthetic traces through
+`POST /api/v1/demo/scenarios/{scenario_id}` using the same opt-in. Supported
+IDs are `suspicious-delegation`, `normal-request`, and `insufficient-evidence`.
+Each trace is stored in memory and evaluated by the deterministic analysis
+engine; these are synthetic inputs, not production telemetry. The frontend
+loads spans and the authorization graph from the normal trace APIs after
+creating a scenario.
+
 Start the backend:
 
 ```powershell
@@ -118,6 +126,7 @@ GET  /api/v1/traces/{trace_id}/graph
 GET  /api/v1/analysis/{trace_id}
 POST /api/v1/analysis/{trace_id}
 POST /api/v1/demo/unauthorized-delegation  # development opt-in required
+POST /api/v1/demo/scenarios/{scenario_id} # development opt-in required
 ```
 
 The graph endpoint extracts authorization context from the selected trace,

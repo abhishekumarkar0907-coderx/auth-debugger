@@ -149,13 +149,14 @@ async function request<T>(
   endpoint: string,
   baseUrl?: string,
   signal?: AbortSignal,
+  method: 'GET' | 'POST' = 'GET',
 ): Promise<T> {
   const url = buildApiUrl(endpoint, baseUrl);
 
   let response: Response;
   try {
     const init: RequestInit = {
-      method: 'GET',
+      method,
       headers: {
         Accept: 'application/json',
       },
@@ -227,6 +228,43 @@ async function request<T>(
   }
 }
 
+export interface DemoScenarioResponse {
+  scenario_id: string;
+  trace_id: string;
+  span_count: number;
+  data_source: 'synthetic_demo';
+}
+
+export async function createDemoScenario(
+  scenarioId: 'suspicious-delegation' | 'normal-request' | 'insufficient-evidence',
+  baseUrl?: string,
+  signal?: AbortSignal,
+): Promise<DemoScenarioResponse> {
+  const response = await request<unknown>(
+    `/api/v1/demo/scenarios/${encodeURIComponent(scenarioId)}`,
+    baseUrl,
+    signal,
+    'POST',
+  );
+  if (!isRecord(response) ||
+      response.scenario_id !== scenarioId ||
+      typeof response.trace_id !== 'string' ||
+      response.span_count !== 3 ||
+      response.data_source !== 'synthetic_demo') {
+    throw new ApiError(
+      'The backend returned a malformed demo scenario response.',
+      200,
+      'ContractError',
+    );
+  }
+  return {
+    scenario_id: scenarioId,
+    trace_id: response.trace_id,
+    span_count: 3,
+    data_source: 'synthetic_demo',
+  };
+}
+
 /**
  * Check backend health status: GET /health
  */
@@ -248,12 +286,16 @@ export async function fetchTraces(baseUrl?: string): Promise<TraceSummary[]> {
 /**
  * Get all normalized spans for a specific trace: GET /api/v1/traces/{trace_id}
  */
-export async function fetchTraceSpans(traceId: string, baseUrl?: string): Promise<SpanRecord[]> {
+export async function fetchTraceSpans(
+  traceId: string,
+  baseUrl?: string,
+  signal?: AbortSignal,
+): Promise<SpanRecord[]> {
   if (!traceId) {
     throw new Error('trace_id is required');
   }
   return validateArray(
-    await request<unknown>(`/api/v1/traces/${encodeURIComponent(traceId)}`, baseUrl),
+    await request<unknown>(`/api/v1/traces/${encodeURIComponent(traceId)}`, baseUrl, signal),
     isSpanRecord,
     'trace spans',
   );
@@ -274,7 +316,11 @@ export async function fetchRecentSpans(limit: number = 100, baseUrl?: string): P
  * Get authorization graph and deterministic analysis:
  * GET /api/v1/traces/{trace_id}/graph
  */
-export async function fetchTraceGraph(traceId: string, baseUrl?: string): Promise<TraceGraphResponse> {
+export async function fetchTraceGraph(
+  traceId: string,
+  baseUrl?: string,
+  signal?: AbortSignal,
+): Promise<TraceGraphResponse> {
   if (!traceId) {
     throw new Error('trace_id is required');
   }
@@ -282,9 +328,11 @@ export async function fetchTraceGraph(traceId: string, baseUrl?: string): Promis
     const response = await request<unknown>(
       `/api/v1/traces/${encodeURIComponent(traceId)}/graph`,
       baseUrl,
+      signal,
     );
     return adaptTraceGraphResponse(response);
   } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error;
     if (error instanceof ApiError && error.status === 404) {
       const detail = isRecord(error.details) ? error.details.detail : error.details;
       const message = typeof detail === 'string' && detail.toLowerCase().includes('trace not found')
